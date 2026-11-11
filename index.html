@@ -1380,17 +1380,21 @@ function cost(){
     const gps=gpsFor(r);
     const taxable=+(r.netPay-gps).toFixed(2);
     const gst=(gon&&no)?+(taxable*gr/100).toFixed(2):0;
-    return {...r,gstNo:no,gps,taxable,gst,payable:+(taxable+gst).toFixed(2)};
+    return {...r,gstNo:no,gps,taxable,gst,payable:+(taxable+gst).toFixed(2),
+      // the GPS recovery is margin earned on this technician
+      profit:+(r.profit+gps).toFixed(2),
+      margin:r.aflGross?((r.profit+gps)/r.aflGross*100):0};
   });
+  const totGps=+payRows.reduce((s,r)=>s+(r.gps||0),0).toFixed(2);
+  const gpsCount=payRows.filter(r=>r.gps>0).length;
   const totPay=+payRows.reduce((s,r)=>s+r.netPay,0).toFixed(2);
   const totGst=+payRows.reduce((s,r)=>s+r.gst,0).toFixed(2);
   const totPayable=+payRows.reduce((s,r)=>s+r.payable,0).toFixed(2);
-  const totGps=+payRows.reduce((s,r)=>s+(r.gps||0),0).toFixed(2);
-  const gpsCount=payRows.filter(r=>r.gps>0).length;
   return {rows:payRows,totCost,totPay,totGst,totPayable,totGps,gpsCount,
     gstRegistered:payRows.filter(r=>r.gst>0).length,
-    profit:+(WEEK.aflNet-totPay).toFixed(2),
-    margin:WEEK.aflNet?((WEEK.aflNet-totPay)/WEEK.aflNet*100):0,
+    // GPS recovered is counted as profit: it is cash Vanguard keeps on the week.
+    profit:+(WEEK.aflNet-totPay+totGps).toFixed(2),
+    margin:WEEK.aflNet?((WEEK.aflNet-totPay+totGps)/WEEK.aflNet*100):0,
     gaps:[...gaps.values()],
     units:+payRows.reduce((s,r)=>s+r.units,0).toFixed(2),
     rawUnits:+WEEK.techs.reduce((s,t)=>s+t.units,0).toFixed(2),
@@ -1527,7 +1531,7 @@ function renderDash(){
    <div class="kpi"><div class="lbl">Technician payout</div><div class="val">${money(C.totPay)}</div>
      <div class="meta">${WEEK.techs.length} technicians · ${C.units.toLocaleString()} units${C.dollarUnits?' of work':''}</div></div>
    <div class="kpi ok"><div class="lbl">Gross profit</div><div class="val ok">${money(C.profit)}</div>
-     <div class="meta">After AFL deductions</div></div>
+     <div class="meta">After AFL deductions${C.totGps?' · incl. '+money(C.totGps)+' GPS recovered':''}</div></div>
    <div class="kpi ${C.margin<12?'warn':'ok'}"><div class="lbl">Margin</div><div class="val">${C.margin.toFixed(1)}%</div>
      <div class="meta">${money(C.profit/(C.units||1))} profit per unit of work</div></div>
    <div class="kpi ${unreg?'warn':''}"><div class="lbl">Register status</div><div class="val">${WEEK.techs.length-unreg}<span style="font-size:16px;color:var(--grey-l)">/${WEEK.techs.length}</span></div>
@@ -1902,7 +1906,7 @@ function renderStmt(){
   ${lockBanner()}
   ${C.totGps?note('info',money(C.totGps)+' GPS recovered from '+C.gpsCount+' technician'+(C.gpsCount>1?'s':'')+' this week',
     'The monthly GPS unit charge of '+money(+S.settings.gpsAmt||0)+' is taken on the first statement of '+(weekMonth()||'the month')
-    +', so it is not deducted again on the month\u2019s later statements. It comes off the job work first and GST is charged on the balance, so the technician is not taxed on the amount recovered. It offsets what you pay for the units.'):''}
+    +', so it is not deducted again on the month\u2019s later statements. It comes off the job work first and GST is charged on the balance, so the technician is not taxed on the amount recovered. The amount recovered is counted as profit for the week.'):''}
   ${blocked?note('warn',blocked+' statement'+(blocked>1?'s':'')+' held back','These technicians did work on task codes with no agreed pay rate. That work is left off their statement and they are paid nothing for it. <a href="#" onclick="priceUnpriced();return false"><b>Price those codes &rarr;</b></a> &nbsp;·&nbsp; To send anyway, turn the hold off in Settings.'):''}
   ${noEmail?note('warn',noEmail+' technician'+(noEmail>1?'s':'')+' have no email address','Add their email on the Technicians page before sending. <a href="#" onclick="go(\'tech\');return false"><b>Open register &rarr;</b></a>'):''}
   ${S.settings.gstOnPay!==false&&C.gstRegistered<rows.length?note('info',
