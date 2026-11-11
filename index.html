@@ -873,6 +873,12 @@ https://github.com/nodeca/pako/blob/main/LICENSE
             <div style="font-size:12px;color:var(--grey)">Applied only to technicians who have a GST/HST number on file, so an unregistered technician is never overpaid.</div></div>
           <input class="inp num" id="s_gstPay" type="number" step="0.01" style="width:78px" title="GST rate on contractor pay">
         </div>
+        <div style="display:flex;align-items:center;gap:13px;padding:11px 0;border-bottom:1px solid #F0F3F8">
+          <label class="sw"><input type="checkbox" id="s_gpsOn"><span class="sl"></span></label>
+          <div style="flex:1"><div style="font-weight:600;font-size:13px">Recover GPS unit charge from technicians</div>
+            <div style="font-size:12px;color:var(--grey)">Deducted once a calendar month, on the first statement of that month. No GST is added. Exclude an individual on the Technicians page.</div></div>
+          <input class="inp num" id="s_gpsAmt" type="number" step="0.01" style="width:78px" title="Monthly GPS charge per technician">
+        </div>
         <div style="display:flex;align-items:center;gap:13px;padding:11px 0">
           <label class="sw"><input type="checkbox" id="s_zero"><span class="sl"></span></label>
           <div style="flex:1"><div style="font-weight:600;font-size:13px">Hold statements that contain unpriced work</div>
@@ -981,7 +987,7 @@ const DEF_SETTINGS={
  name:"Vanguard Connect Services Ltd.",a1:"",a2:"",city:"Surrey, BC",post:"",
  email:"",phone:"",gstno:"",pref:"LML ",next:11,gst:5,terms:45,cur:"CAD",
  note:"Payment by EFT. Please quote the invoice number with remittance.",
- absorb:true,zero:true,gstPay:5,gstOnPay:true,
+ absorb:true,zero:true,gstPay:5,gstOnPay:true,gpsOn:true,gpsAmt:25,
  contact:"",vendorId:"",aflDept:"",netTerms:"",
  b_phone:"",
  b_name:"",b_a1:"",b_a2:"",
@@ -1312,6 +1318,24 @@ const stmtFile=r=>safeFile(`Pay Statement - ${r.name}${r.empNo?' ('+r.empNo+')':
 function cardOf(r){
   if(LOCK&&LOCK.cards&&r.sheet&&LOCK.cards[r.sheet])return LOCK.cards[r.sheet];
   const t=techOf(r);return t?t.card:'fh';}
+// GPS units are supplied by Vanguard and recovered from the technician once a
+// calendar month, on the first statement of that month. The charge is recorded
+// against the week, so reloading a file never charges a second time and a
+// settled week keeps exactly what it charged.
+function gpsFor(r){
+  if(!WEEK)return 0;
+  // A settled week charges what it charged; nothing recalculates.
+  if(LOCK){const row=weekRow();return (row&&row.gps&&+row.gps[r.sheet])||0;}
+  if(S.settings.gpsOn===false)return 0;
+  const amt=+S.settings.gpsAmt||0; if(!amt)return 0;
+  const t=techOf(r); if(t&&t.noGps)return 0;
+  const ym=String(WEEK.weekEnd?new Date(WEEK.weekEnd).toISOString().slice(0,7):'');
+  if(!ym)return amt;
+  // Already recovered from this technician on another week of the same month?
+  const done=S.history.some(x=>x.week!==WEEK.weekLabel
+    && String(x.iso||'').slice(0,7)===ym && x.gps && +x.gps[r.sheet]>0);
+  return done?0:amt;
+}
 function cost(){
   if(!WEEK)return null;
   const gaps=new Map();
@@ -1352,12 +1376,17 @@ function cost(){
     if(LOCK&&LOCK.gstNo&&r.sheet!==undefined&&Object.prototype.hasOwnProperty.call(LOCK.gstNo,r.sheet))
       no=LOCK.gstNo[r.sheet]||'';
     const gst=(gon&&no)?+(r.netPay*gr/100).toFixed(2):0;
-    return {...r,gstNo:no,gst,payable:+(r.netPay+gst).toFixed(2)};
+    // GST is charged on the services the technician supplied; the GPS recovery
+    // is deducted afterwards, so it never reduces the tax on their own work.
+    const gps=gpsFor(r);
+    return {...r,gstNo:no,gst,gps,payable:+(r.netPay+gst-gps).toFixed(2)};
   });
   const totPay=+payRows.reduce((s,r)=>s+r.netPay,0).toFixed(2);
   const totGst=+payRows.reduce((s,r)=>s+r.gst,0).toFixed(2);
   const totPayable=+payRows.reduce((s,r)=>s+r.payable,0).toFixed(2);
-  return {rows:payRows,totCost,totPay,totGst,totPayable,
+  const totGps=+payRows.reduce((s,r)=>s+(r.gps||0),0).toFixed(2);
+  const gpsCount=payRows.filter(r=>r.gps>0).length;
+  return {rows:payRows,totCost,totPay,totGst,totPayable,totGps,gpsCount,
     gstRegistered:payRows.filter(r=>r.gst>0).length,
     profit:+(WEEK.aflNet-totPay).toFixed(2),
     margin:WEEK.aflNet?((WEEK.aflNet-totPay)/WEEK.aflNet*100):0,
@@ -1588,7 +1617,7 @@ function renderTech(){
   const list=[...S.techs].sort((a,b)=>a.name.localeCompare(b.name));
   const unreg=WEEK?WEEK.techs.filter(t=>!techOf(t)):[];
   let h='';
-  if(unreg.length)h+=`<tr><td colspan="8" style="background:var(--warn-l);padding:11px 14px">
+  if(unreg.length)h+=`<tr><td colspan="9" style="background:var(--warn-l);padding:11px 14px">
     <b style="color:#7C4A08">${unreg.length} technician${unreg.length>1?'s':''} in this week's AFL file are not registered:</b>
     <span style="color:#7C4A08"> ${unreg.map(u=>esc(u.name)).join(', ')}</span>
     <button class="btn sm" style="margin-left:10px" onclick="importTechs()">Import all</button></td></tr>`;
@@ -1602,16 +1631,17 @@ function renderTech(){
       <option value="vg"${t.card==='vg'?' selected':''}>Vanguard</option></select></td>
     <td><input class="inp sm" value="${esc(t.gstNo||'')}" placeholder="not registered" onchange="setTech('${t.id}','gstNo',this.value)" style="min-width:150px;font-family:ui-monospace,Menlo,monospace;font-size:12px"></td>
     <td><input class="inp sm" value="${esc(t.phone||'')}" placeholder="optional" onchange="setTech('${t.id}','phone',this.value)" style="min-width:110px"></td>
+    <td><label class="sw" title="${t.noGps?'Not charged for a GPS unit':'Charged '+money(+S.settings.gpsAmt||0)+' a month for the GPS unit'}"><input type="checkbox" ${!t.noGps?'checked':''} onchange="setTech('${t.id}','noGps',!this.checked)"><span class="sl"></span></label></td>
     <td><label class="sw"><input type="checkbox" ${t.active!==false?'checked':''} onchange="setTech('${t.id}','active',this.checked)"><span class="sl"></span></label></td>
     <td class="num"><button class="btn sm danger" onclick="delTech('${t.id}')">Remove</button></td></tr>`).join('');
-  if(!list.length&&!unreg.length)h=`<tr><td colspan="8"><div class="empty">
+  if(!list.length&&!unreg.length)h=`<tr><td colspan="9"><div class="empty">
     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>
     <h3>No technicians yet</h3><p>Upload an AFL file and import the technicians automatically, or add them one at a time.</p></div></td></tr>`;
   document.getElementById('techTbl').innerHTML=`<thead><tr><th>Technician</th><th>Emp #</th><th>Email for statements</th>
-    <th>Pay rate card</th><th>GST/HST number</th><th>Phone</th><th>Active</th><th></th></tr></thead><tbody>${h}</tbody>`;
+    <th>Pay rate card</th><th>GST/HST number</th><th>Phone</th><th title="Charged ${money(+S.settings.gpsAmt||0)} a month">GPS</th><th>Active</th><th></th></tr></thead><tbody>${h}</tbody>`;
 }
 window.setTech=(id,f,v)=>{const t=S.techs.find(x=>x.id===id);if(!t)return;t[f]=v;
-  if(f==='card')refreshWeek();
+  if(f==='card'||f==='noGps')refreshWeek();
   save();
   if(f==='card'||f==='gstNo'){renderDash();renderStmt();renderInv();renderHist();}toast('Saved','ok')};
 window.delTech=id=>{const t=S.techs.find(x=>x.id===id);if(!t)return;
@@ -1862,13 +1892,16 @@ function renderStmt(){
   <div class="kpis">
     <div class="kpi navy"><div class="lbl">Statements to issue</div><div class="val">${rows.length}</div><div class="meta">Week ending ${esc(WEEK.weekLabel)}</div></div>
     <div class="kpi"><div class="lbl">Total payable</div><div class="val">${money(C.totPayable)}</div>
-      <div class="meta">${money(C.totPay)} pay${C.totGst?' + '+money(C.totGst)+' GST':''} · ${C.units.toLocaleString()} units</div></div>
+      <div class="meta">${money(C.totPay)} pay${C.totGst?' + '+money(C.totGst)+' GST':''}${C.totGps?' &minus; '+money(C.totGps)+' GPS':''} · ${C.units.toLocaleString()} units</div></div>
     <div class="kpi ${ready<rows.length?'warn':'ok'}"><div class="lbl">Ready to send</div><div class="val">${ready}<span style="font-size:16px;color:var(--grey-l)">/${rows.length}</span></div>
       <div class="meta">${noEmail?noEmail+' missing email':''}${noEmail&&blocked?' · ':''}${blocked?blocked+' unpriced':''}${!noEmail&&!blocked?'All clear':''}</div></div>
     <div class="kpi ${sentN===rows.length?'ok':''}"><div class="lbl">Sent</div><div class="val ${sentN===rows.length?'ok':''}">${sentN}<span style="font-size:16px;color:var(--grey-l)">/${rows.length}</span></div>
       <div class="meta">${sentN===rows.length?'Everyone has their statement':(pending?pending+' still to send':'none sent yet')}</div></div>
   </div>
   ${lockBanner()}
+  ${C.totGps?note('info',money(C.totGps)+' GPS recovered from '+C.gpsCount+' technician'+(C.gpsCount>1?'s':'')+' this week',
+    'The monthly GPS unit charge of '+money(+S.settings.gpsAmt||0)+' is taken on the first statement of '+(weekMonth()||'the month')
+    +', so it is not deducted again on the month\u2019s later statements. It is shown as a deduction after GST, and offsets what you pay for the units.'):''}
   ${blocked?note('warn',blocked+' statement'+(blocked>1?'s':'')+' held back','These technicians did work on task codes with no agreed pay rate. That work is left off their statement and they are paid nothing for it. <a href="#" onclick="priceUnpriced();return false"><b>Price those codes &rarr;</b></a> &nbsp;·&nbsp; To send anyway, turn the hold off in Settings.'):''}
   ${noEmail?note('warn',noEmail+' technician'+(noEmail>1?'s':'')+' have no email address','Add their email on the Technicians page before sending. <a href="#" onclick="go(\'tech\');return false"><b>Open register &rarr;</b></a>'):''}
   ${S.settings.gstOnPay!==false&&C.gstRegistered<rows.length?note('info',
@@ -1957,6 +1990,11 @@ function stmtData(key){
     exUnits:workUnits(excluded),
     exAfl:+excluded.reduce((s,l)=>s+l.afl,0).toFixed(2)};
 }
+// "November 2026" for the month a week belongs to, used to label the GPS charge.
+function weekMonth(){
+  if(!WEEK||!WEEK.weekEnd)return '';
+  try{return new Date(WEEK.weekEnd).toLocaleDateString('en-CA',{month:'long',year:'numeric'})}catch(e){return ''}
+}
 function pdfHeader(doc,title,sub){
   const S1=S.settings;
   doc.addImage(LOGO,'PNG',14,11,46,15.3);
@@ -2017,12 +2055,18 @@ function buildStmtPDF(key){
   put('Total units',d.units.toLocaleString());
   put('Jobs billed',String(d.billable.length));
   if(d.r.feeShare)put('Less: AFL admin fee share',money(-d.r.feeShare));
+  const gpsM=weekMonth();
   if(d.r.gst>0){
     put('Subtotal for services',money(d.r.netPay));
     put('GST/HST @ '+(+S.settings.gstPay)+'%',money(d.r.gst));
+    if(d.r.gps>0)put('Less: GPS unit'+(gpsM?' \u2014 '+gpsM:''),money(-d.r.gps));
     y+=1.5;put('TOTAL PAYABLE',money(d.r.payable),true);
   }else{
-    y+=1.5;put('TOTAL PAY',money(d.r.netPay),true);
+    if(d.r.gps>0){
+      put('Subtotal for work',money(d.r.netPay));
+      put('Less: GPS unit'+(gpsM?' \u2014 '+gpsM:''),money(-d.r.gps));
+    }
+    y+=1.5;put('TOTAL PAY',money(d.r.payable),true);
   }
 
   pdfFooter(doc, d.r.gst>0
@@ -2045,10 +2089,11 @@ window.previewStmt=key=>{
     <tbody>${d.billable.map(l=>`<tr><td class="nm">${esc(l.d)}</td>
       <td class="num">${l.units.toLocaleString()}</td><td class="num">${money(l.payRate)}</td>
       <td class="num" style="font-weight:600">${money(l.pay)}</td></tr>`).join('')}</tbody>
-    <tfoot><tr><td>${d.r.gst>0?'Subtotal for services':'Total'}</td><td class="num">${d.units.toLocaleString()}</td><td></td>
+    <tfoot><tr><td>${d.r.gst>0||d.r.gps>0?'Subtotal for services':'Total'}</td><td class="num">${d.units.toLocaleString()}</td><td></td>
       <td class="num">${money(d.r.netPay)}</td></tr>
-      ${d.r.gst>0?`<tr><td colspan="3">GST/HST @ ${+S.settings.gstPay}%</td><td class="num">${money(d.r.gst)}</td></tr>
-      <tr><td colspan="3">Total payable</td><td class="num">${money(d.r.payable)}</td></tr>`:''}</tfoot></table></div>
+      ${d.r.gst>0?`<tr><td colspan="3">GST/HST @ ${+S.settings.gstPay}%</td><td class="num">${money(d.r.gst)}</td></tr>`:''}
+      ${d.r.gps>0?`<tr><td colspan="3">Less: GPS unit${weekMonth()?' — '+esc(weekMonth()):''}</td><td class="num">-${money(d.r.gps).replace('$','$')}</td></tr>`:''}
+      ${(d.r.gst>0||d.r.gps>0)?`<tr><td colspan="3">${d.r.gst>0?'Total payable':'Total pay'}</td><td class="num">${money(d.r.payable)}</td></tr>`:''}</tfoot></table></div>
    ${d.excluded.length?`
    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--warn);font-weight:700;margin:18px 0 8px">
      Office only — left off the statement</div>
@@ -2106,6 +2151,7 @@ function stmtEmail(r,d){
 <tr><td style="padding:5px 18px 5px 0;color:#6b7280">Jobs billed</td><td style="padding:5px 0;font-weight:600">${d.billable.length}</td></tr>
 ${r.gst>0?`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Subtotal for services</td><td style="padding:5px 0;font-weight:600">${money(r.netPay)}</td></tr>
 <tr><td style="padding:5px 18px 5px 0;color:#6b7280">GST/HST @ ${+S.settings.gstPay}%</td><td style="padding:5px 0;font-weight:600">${money(r.gst)}</td></tr>`:''}
+${r.gps>0?`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Less: GPS unit${weekMonth()?' — '+esc(weekMonth()):''}</td><td style="padding:5px 0;font-weight:600">-${money(r.gps)}</td></tr>`:''}
 <tr><td style="padding:5px 18px 5px 0;color:#6b7280">${r.gst>0?'Total payable':'Total pay'}</td><td style="padding:5px 0;font-weight:700;font-size:17px;color:#0F8A5F">${money(r.payable)}</td></tr>
 </table>
 <p style="font-size:13px;color:#6b7280">Please review the attached statement and raise any query with the office within 7 days.</p>
@@ -2439,8 +2485,12 @@ function recordWeek(status,extra){
     // compact per-technician figures, so performance can be compared across weeks
     tech:C.rows.map(r=>({s:r.sheet,n:r.name,e:r.empNo||'',c:r.card,
       u:+r.units.toFixed(2),ru:+r.rawUnits.toFixed(2),a:+r.aflGross.toFixed(2),p:+r.netPay.toFixed(2),
+      gps:+(r.gps||0).toFixed(2),
       g:+r.profit.toFixed(2),j:r.lines.length,o:countOrders(r)})),
     techs:WEEK.techs.length,units:C.units,
+    // what each technician was charged for their GPS unit this week
+    gps:C.rows.reduce((o,r)=>{if(r.gps>0)o[r.sheet]=r.gps;return o},{}),
+    gpsRec:C.totGps,
     // A locked week keeps the rates it was settled at; an open one re-snapshots.
     snap:(LOCK?(prev.snap||LOCK):snapWeek()),
     sent:prev.sent||{},
@@ -2771,6 +2821,8 @@ function fillSet(){
   document.getElementById('s_absorb').checked=!!s.absorb;
   document.getElementById('s_zero').checked=!!s.zero;
   document.getElementById('s_gstOnPay').checked=s.gstOnPay!==false;
+  document.getElementById('s_gpsOn').checked=s.gpsOn!==false;
+  document.getElementById('s_gpsAmt').value=s.gpsAmt!==undefined?s.gpsAmt:25;
   document.getElementById('s_gstPay').value=s.gstPay==null?5:s.gstPay;
   renderShare();
 }
@@ -2783,6 +2835,7 @@ function grabSet(){
     b_phone:g('b_phone'),contact:g('s_contact'),vendorId:g('s_vendorId'),aflDept:g('s_aflDept'),netTerms:g('s_netTerms'),
     absorb:document.getElementById('s_absorb').checked,zero:document.getElementById('s_zero').checked,
     gstOnPay:document.getElementById('s_gstOnPay').checked,gstPay:+document.getElementById('s_gstPay').value||0,
+    gpsOn:document.getElementById('s_gpsOn').checked,gpsAmt:+document.getElementById('s_gpsAmt').value||0,
     setV:SET_V});
 }
 
