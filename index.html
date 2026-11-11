@@ -1027,11 +1027,13 @@ function adopt(o){
 }
 function loadLocal(){try{const r=localStorage.getItem(LS);if(r)adopt(JSON.parse(r))}catch(e){}}
 function saveLocal(){try{localStorage.setItem(LS,JSON.stringify(S))}catch(e){}}
-let saveT=null;
+let saveT=null, SBconnecting=false;
 async function save(){
   S.updatedAt=new Date().toISOString();
   saveLocal();
-  if(SB){clearTimeout(saveT);saveT=setTimeout(()=>sbPush(),500);return;}  // batch rapid edits
+  // While the connection is still being made, hold the edit locally; the first
+  // successful poll compares timestamps and pushes it.
+  if(SB||SBconnecting){clearTimeout(saveT);saveT=setTimeout(()=>{if(SB)sbPush()},800);return;}
   if(DB){try{await DB.doc('config/state').set({json:JSON.stringify(S)});
     document.getElementById('syncTxt').textContent='Synced';}catch(e){}}
 }
@@ -2698,7 +2700,7 @@ function grabSet(){
 ========================================================================= */
 let SB=null, SBpoll=null, SBbusy=false, SBlast='';
 const SBCFG='vcs_sb_cfg';
-const BAKED_SB={"url":"https://dbmcghzmlpuwmtidfdxl.supabase.co","key":"sb_publishable_C9pFvAhDaNce1NwagZhYfQ_p69L6RJ1"};
+const BAKED_SB={"url":"https://dbmcghzmlpuwmtidfdxl.supabase.co","key":"sb_publishable_C9pFvAhDaNce1NwagZhYfQ_p69L6RJ1"};   // filled in when the app is built with credentials
 
 function sbRead(){
   const base=BAKED_SB?{...BAKED_SB}:null;
@@ -2756,6 +2758,10 @@ async function sbPull(force){
     if(force||(remote.updatedAt||'')>(S.updatedAt||'')){
       adopt(remote);saveLocal();renderAll();
       if(!force)toast('Updated from a change by someone else','ok');
+    } else if((S.updatedAt||'')>(remote.updatedAt||'')){
+      // This copy is ahead — typically an edit made before the connection
+      // finished. Send it up rather than letting it sit only in this browser.
+      await sbPush();
     }
     SBlast=row.updated_at||'';
     setSync('Shared · '+SB.ws.slice(0,6),true);
@@ -2769,21 +2775,27 @@ async function sbPush(){
   finally{SBbusy=false}
 }
 async function initSB(){
+  SBconnecting=true;
   // Inside Claude, the page runs under a content policy that forbids calling
   // an outside database, so the shared workspace is not offered there at all.
   if(typeof window.claude!=='undefined'){
+    SBconnecting=false;
     const el=document.getElementById('sbBanner');if(el)el.innerHTML='';
     return false;
   }
   const c=sbRead();
-  if(!c){sbSetupBanner();return false;}
+  if(!c){SBconnecting=false;sbSetupBanner();return false;}
   SB=c;
   if(/[#&](c|w)=/.test(location.hash))history.replaceState(null,'',location.pathname+location.search);
   setSync('Connecting…',false);
   await sbPull(!S.techs.length&&!Object.keys(S.rates).length);
+  SBconnecting=false;
   clearInterval(SBpoll);
   SBpoll=setInterval(()=>sbPull(),12000);
   addEventListener('focus',()=>sbPull());
+  addEventListener('beforeunload',()=>{if(SB&&saveT){clearTimeout(saveT);
+    try{navigator.sendBeacon(SB.url.replace(/\/+$/,'')+'/rest/v1/rpc/vcs_put?apikey='+encodeURIComponent(SB.key),
+      new Blob([JSON.stringify({k:SB.ws,j:JSON.stringify(S)})],{type:'application/json'}));}catch(e){}}});
   return true;
 }
 function sbSetupBanner(){
