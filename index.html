@@ -2386,11 +2386,16 @@ async function mailInv(){
    });
 }
 function issueInv(){
+  // Without a week there is nothing to record, and advancing the number anyway
+  // would burn an invoice number against no invoice.
+  if(!WEEK){toast('Load the week\u2019s AFL file before marking an invoice issued','warn');return;}
   const S1=S.settings,T=invTotals();
   const gst=T.tax,tot=T.total,num=T.num;
   confirmM('Mark invoice issued',`Save <b>${esc(num)}</b> (${money(tot)}) to history and advance the next invoice number to <b>${esc((S1.pref||'')+(+S1.next+1))}</b>?`,
    ()=>{closeM();
-    recordWeek('invoiced',{inv:num,gst,total:tot,issued:new Date().toISOString()});
+    const row=recordWeek('invoiced',{inv:num,gst,total:tot,issued:new Date().toISOString()});
+    // The number advances only against a week that was actually recorded.
+    if(!row){toast('Nothing was recorded \u2014 the invoice number is unchanged','bad');return;}
     S.settings.next=+S1.next+1;save();renderAll();
     toast('Invoice '+num+' recorded','ok');go('hist');});
 }
