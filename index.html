@@ -198,6 +198,8 @@ tfoot td{background:#FAFBFD;font-weight:700;color:var(--navy);border-top:2px sol
 .sw input:checked+.sl{background:var(--blue)}
 .sw input:checked+.sl:before{transform:translateX(17px)}
 
+.tag.sent{background:#e7f6ef;color:#0F8A5F;border-color:#bfe6d4}
+.stmt-row.is-sent{background:linear-gradient(90deg,rgba(15,138,95,.045),transparent 42%)}
 .stmt-row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #F0F3F8}
 .stmt-row:last-child{border-bottom:0}
 .stmt-row:hover{background:#FBFCFE}
@@ -989,6 +991,10 @@ const DEF_SETTINGS={
 /* ===================== STATE ===================== */
 let S={settings:{...DEF_SETTINGS},techs:[],rates:{},history:[],seedDone:false,seedV:0,updatedAt:''};
 let WEEK=null, DB=null, MCP=null, DLS=null, sortMode='profit', gapsOnly=false, rateQ='';
+// When a settled week is reopened, LOCK holds the rates, card assignments and GST
+// settings as they stood when its invoice was issued, so a reprinted statement
+// always shows what the technician was actually paid — not today's rates.
+let LOCK=null;
 const LS='vcs_portal_v1';
 // Bumped when the stored roster changes, or when a bug stopped an earlier seed
 // from ever running — devices that recorded the old version seed again.
@@ -1103,7 +1109,16 @@ async function initDL(){try{DLS=await window.claude?.use?.('downloads')||null}ca
 
 /* ---------- rate helpers ---------- */
 function rateFor(id,desc,card){
-  const k=rk(id,desc),o=S.rates[k];
+  const k=rk(id,desc);
+  if(LOCK&&LOCK.rates){
+    const lk=k+'|'+card;
+    // A code absent from the snapshot was not paid that week, so fall through.
+    if(Object.prototype.hasOwnProperty.call(LOCK.rates,lk)){
+      const v=LOCK.rates[lk];
+      return (v===null||v===undefined||v==='')?null:+v;
+    }
+  }
+  const o=S.rates[k];
   // An explicit entry wins, including one deliberately cleared back to unpriced.
   if(o&&Object.prototype.hasOwnProperty.call(o,card)){
     const v=o[card];
@@ -1131,6 +1146,8 @@ const isStdCode=(id,d)=>RATE_DEFAULTS.some(r=>r.id===id&&r.d===d);
 const DOLLAR_PAT=/volume discount|administrative and operational|spiff|churn|bonus|rebate/i;
 const isDollarDefault=(id,d)=>DOLLAR_PAT.test(String(d||''))||/VLDISC|SPIFF/i.test(String(id||''));
 function isDollarCode(id,d){
+  if(LOCK&&LOCK.dollar&&Object.prototype.hasOwnProperty.call(LOCK.dollar,rk(id,d)))
+    return !!LOCK.dollar[rk(id,d)];
   const o=S.rates[rk(id,d)];
   if(o&&o.dollar!==undefined&&o.dollar!==null)return !!o.dollar;
   return isDollarDefault(id,d);
@@ -1292,7 +1309,9 @@ function findTech(name,empNo,sheet,strict){
 const techOf=r=>findTech(r.name,r.empNo,r.sheet);
 const safeFile=s=>String(s).replace(/[\\/:*?"<>|]/g,'-').trim();
 const stmtFile=r=>safeFile(`Pay Statement - ${r.name}${r.empNo?' ('+r.empNo+')':''} - ${WEEK.weekLabel}`)+'.pdf';
-function cardOf(r){const t=techOf(r);return t?t.card:'fh';}
+function cardOf(r){
+  if(LOCK&&LOCK.cards&&r.sheet&&LOCK.cards[r.sheet])return LOCK.cards[r.sheet];
+  const t=techOf(r);return t?t.card:'fh';}
 function cost(){
   if(!WEEK)return null;
   const gaps=new Map();
@@ -1316,7 +1335,8 @@ function cost(){
   });
   const totCost=+rows.reduce((s,r)=>s+r.techCost,0).toFixed(2);
   let payRows=rows;
-  if(!S.settings.absorb&&WEEK.adminFee){
+  const absorb=LOCK&&LOCK.absorb!==undefined?LOCK.absorb:S.settings.absorb;
+  if(!absorb&&WEEK.adminFee){
     const g=WEEK.aflGross||1;
     payRows=rows.map(r=>{const sh=+(WEEK.adminFee*(r.aflGross/g)).toFixed(2);
       return {...r,feeShare:sh,netPay:+(r.techCost+sh).toFixed(2)}});
@@ -1324,9 +1344,13 @@ function cost(){
   // GST is charged by the technician only if they are registered, and a registered
   // supplier's number must appear on the invoice for Vanguard to claim the credit.
   // No number on file means no GST — so an unregistered technician can never be overpaid.
-  const gr=+S.settings.gstPay||0, gon=S.settings.gstOnPay!==false;
+  const gr=+(LOCK&&LOCK.gstPay!==undefined?LOCK.gstPay:S.settings.gstPay)||0;
+  const gon=(LOCK&&LOCK.gstOnPay!==undefined?LOCK.gstOnPay:S.settings.gstOnPay)!==false;
   payRows=payRows.map(r=>{
-    const t=techOf(r), no=t&&t.gstNo?String(t.gstNo).trim():'';
+    const t=techOf(r);
+    let no=t&&t.gstNo?String(t.gstNo).trim():'';
+    if(LOCK&&LOCK.gstNo&&r.sheet!==undefined&&Object.prototype.hasOwnProperty.call(LOCK.gstNo,r.sheet))
+      no=LOCK.gstNo[r.sheet]||'';
     const gst=(gon&&no)?+(r.netPay*gr/100).toFixed(2):0;
     return {...r,gstNo:no,gst,payable:+(r.netPay+gst).toFixed(2)};
   });
@@ -1482,7 +1506,7 @@ function renderDash(){
      <div class="meta">${S.history.length} week${S.history.length===1?'':'s'} recorded · <a href="#" onclick="go('hist');return false">history &rarr;</a></div></div>`;
 
   // warnings
-  let w='';
+  let w=lockBanner();
   if(WEEK.aflStated!=null&&Math.abs(WEEK.aflStated-WEEK.aflNet)>0.02){
     w+=note('warn','Totals differ from AFL summary',`This portal totals <b>${money(WEEK.aflNet)}</b> from the technician tabs; AFL's own summary tab states <b>${money(WEEK.aflStated)}</b> (difference ${money(WEEK.aflStated-WEEK.aflNet)}). Check the file before invoicing.`);
   }else if(WEEK.aflStated!=null){
@@ -1830,6 +1854,9 @@ function renderStmt(){
   const blocked=S.settings.zero?rows.filter(r=>r.unpricedUnits>0).length:0;
   // a technician can be both blocked and missing an email — count the ones actually sendable
   const ready=rows.filter(r=>r.email&&!(S.settings.zero&&r.unpricedUnits>0)).length;
+  const SM=sentMap();
+  const sentN=rows.filter(r=>SM[r.sheet]).length;
+  const pending=rows.filter(r=>!SM[r.sheet]&&r.email&&!(S.settings.zero&&r.unpricedUnits>0)).length;
 
   el.innerHTML=`
   <div class="kpis">
@@ -1838,7 +1865,10 @@ function renderStmt(){
       <div class="meta">${money(C.totPay)} pay${C.totGst?' + '+money(C.totGst)+' GST':''} · ${C.units.toLocaleString()} units</div></div>
     <div class="kpi ${ready<rows.length?'warn':'ok'}"><div class="lbl">Ready to send</div><div class="val">${ready}<span style="font-size:16px;color:var(--grey-l)">/${rows.length}</span></div>
       <div class="meta">${noEmail?noEmail+' missing email':''}${noEmail&&blocked?' · ':''}${blocked?blocked+' unpriced':''}${!noEmail&&!blocked?'All clear':''}</div></div>
+    <div class="kpi ${sentN===rows.length?'ok':''}"><div class="lbl">Sent</div><div class="val ${sentN===rows.length?'ok':''}">${sentN}<span style="font-size:16px;color:var(--grey-l)">/${rows.length}</span></div>
+      <div class="meta">${sentN===rows.length?'Everyone has their statement':(pending?pending+' still to send':'none sent yet')}</div></div>
   </div>
+  ${lockBanner()}
   ${blocked?note('warn',blocked+' statement'+(blocked>1?'s':'')+' held back','These technicians did work on task codes with no agreed pay rate. That work is left off their statement and they are paid nothing for it. <a href="#" onclick="priceUnpriced();return false"><b>Price those codes &rarr;</b></a> &nbsp;·&nbsp; To send anyway, turn the hold off in Settings.'):''}
   ${noEmail?note('warn',noEmail+' technician'+(noEmail>1?'s':'')+' have no email address','Add their email on the Technicians page before sending. <a href="#" onclick="go(\'tech\');return false"><b>Open register &rarr;</b></a>'):''}
   ${S.settings.gstOnPay!==false&&C.gstRegistered<rows.length?note('info',
@@ -1855,19 +1885,49 @@ function renderStmt(){
    <div class="card-b flush">
     ${rows.map(r=>{
       const bad=S.settings.zero&&r.unpricedUnits>0;
-      return `<div class="stmt-row">
-       <input type="checkbox" class="chk stSel" data-s="${esc(r.sheet)}" ${(!r.email||bad)?'disabled':'checked'}>
+      const sentAt=SM[r.sheet];
+      return `<div class="stmt-row${sentAt?' is-sent':''}">
+       <input type="checkbox" class="chk stSel" data-s="${esc(r.sheet)}" ${(!r.email||bad)?'disabled':(sentAt?'':'checked')}>
        <div class="av">${initials(r.name)}</div>
        <div class="info"><div class="n">${esc(r.name)} <span class="tag ${r.card}">${r.card==='fh'?'Field House':'Vanguard'}</span>
+         ${sentAt?`<span class="tag sent" title="Statement sent ${esc(new Date(sentAt).toLocaleString('en-CA'))}">&#10003; sent</span>`:''}
          ${r.nilUnits?`<span class="tag warn" title="${r.nilUnits} unit(s) at no or zero rate are left off this statement">${r.nilUnits} unit${r.nilUnits>1?'s':''} withheld</span>`:''}</div>
          <div class="e">${r.email?esc(r.email):'<span style="color:var(--warn)">no email on file</span>'}${r.empNo?' · Emp #'+esc(r.empNo):''}</div></div>
        <div class="amt"><div class="a">${money(r.payable)}</div><div class="u">${r.gst>0?money(r.netPay)+' + '+money(r.gst)+' GST':(+(r.units-r.nilUnits).toFixed(2)).toLocaleString()+' units · no GST'}</div></div>
+       <button class="btn sm" data-sent="${esc(r.sheet)}" data-on="${sentAt?'0':'1'}" title="${sentAt?'Mark as not sent':'Mark as sent by hand'}">${sentAt?'Undo':'Mark sent'}</button>
        <button class="btn sm" onclick="previewStmt('${esc(r.sheet).replace(/'/g,"\\'")}')">Preview</button>
        <button class="btn sm" onclick="dlStmt('${esc(r.sheet).replace(/'/g,"\\'")}')">PDF</button>
       </div>`}).join('')}
    </div></div>`;
   document.getElementById('dlAll').onclick=()=>downloadAll();
   document.getElementById('mailAll').onclick=()=>mailAll();
+  el.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>markSent([b.dataset.sent],b.dataset.on==='1'));
+}
+/* ---------- settled-week lock & sent register ---------- */
+const weekRow=()=>WEEK?S.history.find(x=>x.week===WEEK.weekLabel):null;
+const sentMap=()=>{const r=weekRow();return (r&&r.sent)||{};};
+function markSent(sheets,on){
+  if(!WEEK||!sheets.length)return;
+  const m=Object.assign({},sentMap());
+  sheets.forEach(s=>{if(on)m[s]=new Date().toISOString();else delete m[s]});
+  recordWeek(null,{sent:m});save();renderStmt();
+}
+function lockBanner(){
+  if(!LOCK)return '';
+  const d=LOCK.at?new Date(LOCK.at).toLocaleDateString('en-CA'):'';
+  return note('info','Showing the rates this week was settled at',
+    'This week\u2019s invoice has been issued, so its pay rates, rate-card assignments and GST numbers are frozen as they stood'
+    +(d?' on '+esc(d):'')+'. A statement reprinted now matches what the technician was actually paid, even though rate cards have changed since. '
+    +'<a href="#" onclick="unlockWeek();return false"><b>Recalculate at today\u2019s rates &rarr;</b></a>');
+}
+function unlockWeek(){
+  if(!LOCK)return;
+  confirmM('Recalculate at today\u2019s rates',
+    'This week was settled and its figures are frozen. Recalculating applies your current rate cards, card assignments and GST settings, '
+    +'which will change the recorded profit for the week and what reprinted statements show.<br><br>'
+    +'Do this only to correct a genuine error \u2014 not to reprint a statement a technician has already been paid against.',
+   ()=>{closeM();LOCK=null;recordWeek();save();renderAll();
+     toast('Week recalculated at today\u2019s rates','warn')});
 }
 function emptyWeek(t){return `<div class="card"><div class="card-b"><div class="empty">
   <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -2066,7 +2126,7 @@ async function mailAll(){
     async()=>{
       closeM();const btn=document.getElementById('mailAll');
       btn.disabled=true;btn.innerHTML='<span class="sp"></span> Creating…';
-      let ok=0,fail=0;
+      let ok=0,fail=0;const done=[];
       for(const n of sel){
         try{
           const r=C.rows.find(x=>x.sheet===n);if(!r){fail++;continue;}
@@ -2077,10 +2137,11 @@ async function mailAll(){
           const em=stmtEmail(r,stmtData(n));
           await MCP.callTool('Gmail','create_draft',{to:[t.email],subject:em.subject,htmlBody:em.html,
             attachments:[{content:b64,filename:stmtFile(r),mimeType:'application/pdf'}]});
-          ok++;
+          ok++;done.push(n);
         }catch(e){fail++;console.error(e);}
       }
       btn.disabled=false;btn.innerHTML='Create Gmail drafts';
+      if(done.length)markSent(done,true);
       if(ok)toast(ok+' Gmail draft'+(ok>1?'s':'')+' created — review and send from Gmail','ok');
       if(fail)toast(fail+' could not be created','bad');
     });
@@ -2337,6 +2398,30 @@ function issueInv(){
 /* ===================== HISTORY ===================== */
 // A week is recorded the moment its file is loaded, so profit history builds
 // itself every Monday; issuing the invoice upgrades the row rather than creating it.
+// Freeze everything that decided what each technician was paid this week, so the
+// week can be reprinted faithfully after rate cards, GST numbers or card
+// assignments change. Only the codes this week actually used are stored.
+function snapWeek(){
+  if(!WEEK)return null;
+  const rates={},dollar={},cards={},gstNo={};
+  WEEK.techs.forEach(t=>{
+    const card=cardOf(t);
+    if(t.sheet){
+      cards[t.sheet]=card;
+      const reg=techOf(t);
+      gstNo[t.sheet]=reg&&reg.gstNo?String(reg.gstNo).trim():'';
+    }
+    t.lines.forEach(l=>{
+      const k=rk(l.id,l.d);
+      rates[k+'|'+card]=rateFor(l.id,l.d,card);
+      dollar[k]=isDollarCode(l.id,l.d);
+    });
+  });
+  return {at:new Date().toISOString(),rates,dollar,cards,gstNo,
+    gstPay:+S.settings.gstPay||0,
+    gstOnPay:S.settings.gstOnPay!==false,
+    absorb:!!S.settings.absorb};
+}
 function recordWeek(status,extra){
   if(!WEEK)return null;
   const C=cost();
@@ -2351,6 +2436,9 @@ function recordWeek(status,extra){
       u:+r.units.toFixed(2),ru:+r.rawUnits.toFixed(2),a:+r.aflGross.toFixed(2),p:+r.netPay.toFixed(2),
       g:+r.profit.toFixed(2),j:r.lines.length,o:countOrders(r)})),
     techs:WEEK.techs.length,units:C.units,
+    // A locked week keeps the rates it was settled at; an open one re-snapshots.
+    snap:(LOCK?(prev.snap||LOCK):snapWeek()),
+    sent:prev.sent||{},
     status:status||prev.status||'draft'},extra||{});
   S.history=S.history.filter(x=>x.week!==WEEK.weekLabel);
   S.history.push(row);
@@ -2363,7 +2451,7 @@ function countOrders(r){const s=new Set();r.lines.forEach(l=>{if(l.order)s.add(l
 // Keep the store well inside its size cap: detail for recent weeks, totals for the rest.
 function pruneHistory(){
   const asc=[...S.history].sort((a,b)=>String(a.iso||'').localeCompare(String(b.iso||'')));
-  if(asc.length>40)asc.slice(0,asc.length-40).forEach(r=>{delete r.tech});
+  if(asc.length>40)asc.slice(0,asc.length-40).forEach(r=>{delete r.tech;delete r.snap});
 }
 const histAsc=()=>[...S.history].sort((a,b)=>String(a.iso||'').localeCompare(String(b.iso||'')));
 function histWithCum(){
@@ -2977,9 +3065,15 @@ function handleFile(f){
       const W=parseWorkbook(wb,f.name);
       if(!W.techs.length)throw new Error('No technician tabs found. This does not look like an AFL settlement file.');
       WEEK=W;
+      // Reopening a week whose invoice has gone out: pay it back at the rates it
+      // was settled at, not at today's.
+      LOCK=null;
+      const prior=S.history.find(x=>x.week===W.weekLabel);
+      if(prior&&prior.status==='invoiced'&&prior.snap)LOCK=prior.snap;
       resetDrop(f.name,W);
       recordWeek();save();
       renderAll();go('dash');
+      if(LOCK)setTimeout(()=>toast('Settled week reopened — showing the rates it was paid at','info'),1200);
       const unreg=W.techs.filter(t=>!techOf(t)).length;
       toast(`${W.techs.length} technicians loaded · ${money(W.aflNet)} receivable`,'ok');
       const nc=newCodes();
