@@ -1217,6 +1217,11 @@ function parseWorkbook(wb,fname){
   const sheets=wb.SheetNames;
   let weekEnd=null,weekLabel='',adminFee=0,aflStated=null;
   const sumLines=[];
+  // AFL's settlement advice bills the current week and, below it, any corrections
+  // to earlier weeks under Type "Adjustments" — each with its own week-ending
+  // date, its own admin-fee line and its own total. Those are invoiced
+  // separately, so every summary line is tagged with the block it belongs to.
+  const adjBlocks={};
 
   // ---- summary sheet: admin fee + stated grand total ----
   // Layout notes from AFL's file: subtotal rows carry their label in column 2
@@ -1228,24 +1233,43 @@ function parseWorkbook(wb,fname){
     const hm=colMap(sum[0]);
     const ci=hm.id!=null?hm.id:4, cp=hm.p!=null?hm.p:8;
     let cidS='';
+    let blk=null;                                      // null = the current week
     for(let i=1;i<sum.length;i++){
       const row=sum[i];
       const c0=String(row[0]||''),c1=String(row[1]||''),c2=String(row[2]||'');
       const pay=+row[cp];
       if(isTotalRow(c0,c1,c2)){
         if(/week ending.*totals?\s+for/i.test(c0+' '+c1)&&!isNaN(pay))aflStated=pay;
+        // "Total for Work Week Ending …" closes whichever block it belongs to.
+        else if(blk&&adjBlocks[blk]&&!isNaN(pay))adjBlocks[blk].stated=+pay.toFixed(2);
         continue;
       }
+      // The Type column opens a block. "Discount" and blank rows stay in the
+      // block already open, which is how an adjustment's own fee line is caught.
+      const type=c2.trim();
+      if(/^adjust/i.test(type)){
+        const d=excelDate(row[1]);
+        blk=d?d.toISOString().slice(0,10):('adj-'+(c1||i));
+        if(!adjBlocks[blk])adjBlocks[blk]={key:blk,end:d?d.toISOString():null,
+          label:d?fmtDate(d):'an earlier week',fee:0,net:0,stated:null};
+      }else if(type&&!/^discount/i.test(type))blk=null;
       const raw=String(row[ci]||'').trim();            // this row only — never forward-filled
-      if(DISCOUNT_CODES.includes(raw)&&!isNaN(pay))adminFee+=pay;
-      if(!weekEnd){const d=excelDate(row[1]);if(d)weekEnd=d;}
+      if(DISCOUNT_CODES.includes(raw)&&!isNaN(pay)){
+        adminFee+=pay;
+        if(blk&&adjBlocks[blk])adjBlocks[blk].fee+=pay;
+      }
+      if(!isNaN(pay)&&blk&&adjBlocks[blk])adjBlocks[blk].net+=pay;
+      if(!weekEnd&&!blk){const d=excelDate(row[1]);if(d)weekEnd=d;}
       // AFL's own billing breakdown, kept in its printed order — this is what the
       // invoice must reproduce, blocks and repeated descriptions included.
       const desc=String(row[hm.d!=null?hm.d:5]||'').trim();
       const up=+row[hm.r!=null?hm.r:6], q=+row[hm.u!=null?hm.u:7];
-      if(desc&&!isNaN(up)&&!isNaN(q)&&!isNaN(pay)&&(q!==0||pay!==0))
-        sumLines.push({d:desc,rate:up,units:q,amt:+pay.toFixed(2),code:cidS});
+      // The row's own task code wins; a blank one continues the code above it.
+      // This must happen before the line is pushed, or every line carries the
+      // code of the line before it.
       if(raw)cidS=raw;
+      if(desc&&!isNaN(up)&&!isNaN(q)&&!isNaN(pay)&&(q!==0||pay!==0))
+        sumLines.push({d:desc,rate:up,units:q,amt:+pay.toFixed(2),code:cidS,adj:blk||null});
     }
   }
 
@@ -1300,6 +1324,7 @@ function parseWorkbook(wb,fname){
   return {file:fname,weekEnd,weekLabel:weekLabel||(weekEnd?fmtDate(weekEnd):'Unknown week'),
     techs,tasks:[...taskAgg.values()].sort((a,b)=>b.afl-a.afl),
     adminFee:+adminFee.toFixed(2),aflGross,aflNet:net,sumLines,
+    adjBlocks:Object.values(adjBlocks).map(b=>({...b,fee:+b.fee.toFixed(2),net:+b.net.toFixed(2)})),
     aflStated:aflStated!=null?+aflStated.toFixed(2):null};
 }
 
@@ -2361,23 +2386,55 @@ async function mailAll(){
    breakdown in its own order, blue header bands, and the QTY / SUBTOTAL /
    TOTAL TAX / TOTAL / BALANCE DUE block.
 ========================================================== */
-function invLines(){
+// Every invoice this week produces: the week itself, then one per block of
+// adjustments to an earlier week. AFL bills them together; they are invoiced
+// apart so an adjustment never rides inside a week's own invoice.
+function invBlocks(){
   if(!WEEK)return [];
-  if(WEEK.sumLines&&WEEK.sumLines.length)
-    return WEEK.sumLines.map(l=>({desc:l.d,code:l.code||'',units:l.units,rate:l.rate,amt:l.amt}));
+  const out=[{key:'main',kind:'main',title:'',label:WEEK.weekLabel}];
+  (WEEK.adjBlocks||[]).forEach(b=>out.push({key:b.key,kind:'adj',
+    title:'Adjustments \u2014 week ending '+b.label,label:b.label,
+    fee:b.fee,stated:b.stated}));
+  return out;
+}
+const adjCount=()=>((WEEK&&WEEK.adjBlocks)||[]).length;
+function invLines(key){
+  if(!WEEK)return [];
+  if(WEEK.sumLines&&WEEK.sumLines.length){
+    const k=key&&key!=='main'?key:null;
+    return WEEK.sumLines.filter(l=>(l.adj||null)===k)
+      .map(l=>({desc:l.d,code:l.code||'',units:l.units,rate:l.rate,amt:l.amt}));
+  }
+  if(key&&key!=='main')return [];
   // Fallback when AFL's summary tab can't be read: aggregate the technician tabs.
   const lines=WEEK.tasks.map(t=>({desc:t.d,code:t.id,units:t.units,rate:t.rate,amt:+t.afl.toFixed(2)}));
   if(WEEK.adminFee)lines.push({desc:'Administrative and Operational Support Fee',code:'01-LABR-VLDISC',
     units:Math.abs(WEEK.adminFee),rate:-1,amt:WEEK.adminFee});
   return lines;
 }
-function invTotals(){
-  const S1=S.settings,lines=invLines();
+function invTotals(key){
+  const S1=S.settings,lines=invLines(key);
   const qty=+lines.reduce((s,l)=>s+(l.units||0),0).toFixed(2);
   const sub=+lines.reduce((s,l)=>s+(l.amt||0),0).toFixed(2);
   const tax=+(sub*(+S1.gst||0)/100).toFixed(2);
-  return {lines,qty,sub,tax,total:+(sub+tax).toFixed(2),num:(S1.pref||'')+S1.next};
+  return {key:key||'main',lines,qty,sub,tax,total:+(sub+tax).toFixed(2),
+    num:invNumFor(key||'main')};
 }
+// A number already issued for this invoice sticks; anything not yet issued
+// previews the next number in the series.
+function invNumFor(key){
+  const row=weekRow();
+  const rec=row&&Array.isArray(row.invs)&&row.invs.find(x=>x.key===key);
+  if(rec&&rec.inv)return rec.inv;
+  // Not yet issued: show the number it would take, counting the unissued
+  // invoices ahead of it, so two invoices never preview the same number.
+  const order=invBlocks().map(b=>b.key).filter(k=>!invIssued(k));
+  const i=order.indexOf(key);
+  return (S.settings.pref||'')+(+S.settings.next+(i<0?0:i));
+}
+const invIssued=key=>{const row=weekRow();
+  const rec=row&&Array.isArray(row.invs)&&row.invs.find(x=>x.key===key);
+  return rec&&rec.inv?rec:null;};
 const invDate=d=>{const x=d||new Date();
   return String(x.getMonth()+1).padStart(2,'0')+'/'+String(x.getDate()).padStart(2,'0')+'/'+x.getFullYear()};
 const weekDate=()=>{if(!WEEK)return '';
@@ -2392,13 +2449,17 @@ function renderInv(){
 
   el.innerHTML=`
   <div class="kpis">
-    <div class="kpi navy"><div class="lbl">Subtotal</div><div class="val">${money(T.sub)}</div><div class="meta">${T.lines.length} lines · ${T.qty.toLocaleString()} units</div></div>
+    <div class="kpi navy"><div class="lbl">Subtotal</div><div class="val">${money(T.sub)}</div><div class="meta">${T.lines.length} lines · ${T.qty.toLocaleString()} units${adjCount()?' · adjustments excluded':''}</div></div>
     <div class="kpi"><div class="lbl">Total tax @ ${+S1.gst}%</div><div class="val">${money(T.tax)}</div><div class="meta">${esc(S1.gstno||'Set GST # in Settings')}</div></div>
     <div class="kpi ok"><div class="lbl">Balance due</div><div class="val ok">${money(T.total)}</div><div class="meta">Terms ${esc(S1.netTerms||'')} · due ${due.toLocaleDateString('en-CA',{day:'2-digit',month:'short',year:'numeric'})}</div></div>
     <div class="kpi"><div class="lbl">Invoice number</div><div class="val" style="font-size:20px">${esc(T.num)}</div><div class="meta">Next after issuing: ${esc((S1.pref||'')+(+S1.next+1))}</div></div>
   </div>
-  ${WEEK.aflStated!=null&&Math.abs(WEEK.aflStated-T.sub)>0.02?note('warn','Subtotal differs from AFL\'s stated total',
-    `This invoice totals <b>${money(T.sub)}</b> but AFL's summary states <b>${money(WEEK.aflStated)}</b>. Check the file before sending.`):''}
+  ${adjCount()?note('info',adjCount()+' adjustment block'+(adjCount()>1?'s':'')+' billed separately',
+    'AFL\u2019s settlement advice includes '+money(invBlocks().filter(b=>b.kind==='adj').reduce((s,b)=>s+invTotals(b.key).sub,0))
+    +' of adjustments to earlier weeks. '+(adjCount()>1?'They are':'It is')+' kept off this invoice and raised separately below, each with its own invoice number.'):''}
+  ${(()=>{const all=invBlocks().reduce((s,b)=>s+invTotals(b.key).sub,0);
+    return WEEK.aflStated!=null&&Math.abs(WEEK.aflStated-all)>0.02?note('warn','Totals differ from AFL\'s stated total',
+    `This invoice and the adjustments total <b>${money(all)}</b> but AFL's summary states <b>${money(WEEK.aflStated)}</b>. Check the file before sending.`):''})()}
   ${S1.numReset?note('warn','Check the invoice number before you issue',
     `Numbering was switched to your AFL series and set to <b>${esc(T.num)}</b>. If your last AFL invoice was not the one before it, correct the next number in <a href="#" onclick="go('set');return false"><b>Settings</b></a>. `+
     `<a href="#" onclick="clearNumNote();return false">Dismiss</a>`):''}
@@ -2454,17 +2515,46 @@ function renderInv(){
     ${C.rows.length-C.gstRegistered>0?`<div style="padding:13px 18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--grey)">
       ${C.rows.length-C.gstRegistered} technician${C.rows.length-C.gstRegistered>1?'s have':' has'} no GST/HST number on file, so no GST is added to ${C.rows.length-C.gstRegistered>1?'their':'that'} statement${C.rows.length-C.gstRegistered>1?'s':''}.
       <a href="#" onclick="go('tech');return false">Technicians page &rarr;</a></div>`:''}
-   </div></div>`;
+   </div></div>
+  ${adjCount()?invBlocks().filter(b=>b.kind==='adj').map(b=>{
+    const A=invTotals(b.key),done=invIssued(b.key);
+    return `<div class="card" style="margin-top:18px;border-left:3px solid var(--navy)">
+      <div class="card-h"><h2>Adjustments &mdash; week ending ${esc(b.label)}</h2>
+        <span class="sub">Billed on its own invoice, separate from this week${done?' · issued as '+esc(done.inv):''}</span>
+        <div class="r">
+          <button class="btn" data-adjpdf="${esc(b.key)}">PDF</button>
+          <button class="btn" data-adjmail="${esc(b.key)}">Email${MCP?'':' (connect Gmail)'}</button>
+          <button class="btn ${done?'':'d'}" data-adjissue="${esc(b.key)}" ${done?'disabled':''}>${done?'Issued':'Mark issued'}</button>
+        </div></div>
+      <div class="card-b flush">
+       <div class="tw"><table>
+        <thead><tr><th>Description</th><th>Task code</th><th class="num">Units</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+        <tbody>${A.lines.map(l=>`<tr><td class="nm">${esc(l.desc)}</td><td class="mono" style="font-size:11.5px">${esc(l.code||'')}</td>
+          <td class="num">${fmtQ(l.units)}</td><td class="num">${fmtU(l.rate)}</td><td class="num" style="font-weight:600">${fmtU(l.amt)}</td></tr>`).join('')}</tbody>
+        <tfoot>
+          <tr><td colspan="4">Subtotal</td><td class="num">${fmtU(A.sub)}</td></tr>
+          <tr><td colspan="4">GST @ ${+S1.gst}%</td><td class="num">${fmtU(A.tax)}</td></tr>
+          <tr><td colspan="4"><b>Invoice ${esc(A.num)}</b></td><td class="num"><b>${fmtU(A.total)}</b></td></tr>
+        </tfoot></table></div>
+       ${b.stated!=null&&Math.abs(b.stated-A.sub)>0.02?note('warn','Does not match AFL\u2019s block total',
+         `AFL states <b>${money(b.stated)}</b> for this block but these lines total <b>${money(A.sub)}</b>.`):''}
+      </div></div>`}).join(''):''}`;
   document.getElementById('invPdf').onclick=async()=>{
-    if(await dl(buildInvPDF().output('blob'),safeFile('Invoice '+T.num+' - '+S1.b_name)+'.pdf'))toast('Invoice saved','ok')};
-  document.getElementById('invMail').onclick=()=>mailInv();
-  document.getElementById('invIssue').onclick=()=>issueInv();
+    if(await dl(buildInvPDF('main').output('blob'),safeFile('Invoice '+T.num+' - '+S1.b_name)+'.pdf'))toast('Invoice saved','ok')};
+  document.getElementById('invMail').onclick=()=>mailInv('main');
+  document.getElementById('invIssue').onclick=()=>issueInv('main');
+  el.querySelectorAll('[data-adjpdf]').forEach(btn=>btn.onclick=async()=>{
+    const k=btn.dataset.adjpdf,A=invTotals(k);
+    if(await dl(buildInvPDF(k).output('blob'),safeFile('Invoice '+A.num+' - adjustments - '+S1.b_name)+'.pdf'))toast('Invoice saved','ok')});
+  el.querySelectorAll('[data-adjmail]').forEach(btn=>btn.onclick=()=>mailInv(btn.dataset.adjmail));
+  el.querySelectorAll('[data-adjissue]').forEach(btn=>btn.onclick=()=>issueInv(btn.dataset.adjissue));
 }
 const fmtU=v=>(v<0?'($':'$')+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+(v<0?')':'');
 const fmtQ=v=>(v<0?'(':'')+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+(v<0?')':'');
 
-function buildInvPDF(){
-  const S1=S.settings,T=invTotals();
+function buildInvPDF(key){
+  const S1=S.settings,T=invTotals(key);
+  const blk=invBlocks().find(b=>b.key===(key||'main'))||{kind:'main'};
   const {jsPDF}=window.jspdf;const doc=new jsPDF({unit:'mm',format:'a4'});
   const L=12,R=198,W=R-L;
   const LW=92, SP=10;                       // left block, narrow spacer column
@@ -2504,7 +2594,13 @@ function buildInvPDF(){
   cell(L,L+LW,y,[S1.city,S1.post].filter(Boolean).join(', '),{bold:true});
   band(CA,R,y,'WEEK ENDING DATE',MD); y+=rh;
   cell(L,L+LW,y,S1.phone?'Phone: '+S1.phone:'',{bold:true});
-  cell(CA,R,y,weekDate(),{align:'center',bold:true}); y+=rh+3.2;
+  cell(CA,R,y,blk.kind==='adj'?blk.label:weekDate(),{align:'center',bold:true}); y+=rh+3.2;
+  if(blk.kind==='adj'){
+    doc.setFont('helvetica','bold');doc.setFontSize(8.4);doc.setTextColor(DK[0],DK[1],DK[2]);
+    doc.text('ADJUSTMENTS TO WEEK ENDING '+String(blk.label).toUpperCase()
+      +'  \u00b7  BILLED WITH SETTLEMENT OF '+String(WEEK.weekLabel).toUpperCase(),L,y-1.2);
+    y+=3.4;
+  }
 
   bandL(L,L+LW,y,'BILL TO:',MD);
   band(CA,CB,y,'GST #',MD); band(CB,R,y,'VENDOR ID',MD); y+=rh;
@@ -2569,16 +2665,17 @@ function buildInvPDF(){
   return doc;
 }
 
-async function mailInv(){
+async function mailInv(key){
   const S1=S.settings;
   if(!MCP){toast('Connect Gmail to your Claude account to email invoices','warn');return;}
   if(!S1.b_email){toast('Add the AFL accounts-payable email in Settings first','warn');go('set');return;}
-  const T=invTotals();
+  const T=invTotals(key);
+  const blk=invBlocks().find(b=>b.key===(key||'main'))||{kind:'main'};
   const sub=T.sub,gst=T.tax,tot=T.total,num=T.num;
   confirmM('Email invoice '+num,`Create a Gmail draft to <b>${esc(S1.b_email)}</b> with the invoice PDF attached? Nothing is sent until you review it in Gmail.`,
    async()=>{closeM();
     try{
-      const doc=buildInvPDF();const b64=doc.output('datauristring').split(',')[1];
+      const doc=buildInvPDF(key);const b64=doc.output('datauristring').split(',')[1];
       await MCP.callTool('Gmail','create_draft',{to:[S1.b_email],
         subject:`Invoice ${num} — ${S1.name} — week ending ${WEEK.weekLabel}`,
         htmlBody:`<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1b2234;line-height:1.6">
@@ -2594,19 +2691,35 @@ async function mailInv(){
     }catch(e){console.error(e);toast('Could not create the draft — check the Gmail connection','bad');}
    });
 }
-function issueInv(){
+function issueInv(key){
   // Without a week there is nothing to record, and advancing the number anyway
   // would burn an invoice number against no invoice.
   if(!WEEK){toast('Load the week\u2019s AFL file before marking an invoice issued','warn');return;}
-  const S1=S.settings,T=invTotals();
-  const gst=T.tax,tot=T.total,num=T.num;
-  confirmM('Mark invoice issued',`Save <b>${esc(num)}</b> (${money(tot)}) to history and advance the next invoice number to <b>${esc((S1.pref||'')+(+S1.next+1))}</b>?`,
+  key=key||'main';
+  if(invIssued(key)){toast('That invoice has already been issued','warn');return;}
+  const S1=S.settings,T=invTotals(key);
+  const blk=invBlocks().find(b=>b.key===key)||{kind:'main'};
+  if(!T.lines.length){toast('There is nothing on that invoice','warn');return;}
+  // Whatever the preview showed, the number actually taken is the next free one.
+  T.num=(S1.pref||'')+S1.next;
+  const what=blk.kind==='adj'?'the adjustments for week ending '+esc(blk.label):'week ending '+esc(WEEK.weekLabel);
+  confirmM('Mark invoice issued',
+    `Save <b>${esc(T.num)}</b> (${money(T.total)}) for ${what} to history and advance the next invoice number to <b>${esc((S1.pref||'')+(+S1.next+1))}</b>?`,
    ()=>{closeM();
-    const row=recordWeek('invoiced',{inv:num,gst,total:tot,issued:new Date().toISOString()});
-    // The number advances only against a week that was actually recorded.
+    const prev=weekRow();
+    const invs=(prev&&Array.isArray(prev.invs)?prev.invs.slice():[])
+      .filter(x=>x.key!==key)
+      .concat([{key,kind:blk.kind,label:blk.kind==='adj'?blk.label:WEEK.weekLabel,
+                inv:T.num,gst:T.tax,total:T.total,issued:new Date().toISOString()}]);
+    // The week counts as settled once its own invoice is out; that is what
+    // freezes its pay rates.
+    const mainOut=key==='main'||invs.some(x=>x.key==='main');
+    const extra={invs};
+    if(key==='main'){extra.inv=T.num;extra.gst=T.tax;extra.total=T.total;extra.issued=new Date().toISOString();}
+    const row=recordWeek(mainOut?'invoiced':null,extra);
     if(!row){toast('Nothing was recorded \u2014 the invoice number is unchanged','bad');return;}
     S.settings.next=+S1.next+1;save();renderAll();
-    toast('Invoice '+num+' recorded','ok');go('hist');});
+    toast('Invoice '+T.num+' recorded','ok');go('hist');});
 }
 
 /* ===================== HISTORY ===================== */
