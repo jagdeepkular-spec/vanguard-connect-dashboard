@@ -2441,6 +2441,32 @@ const weekDate=()=>{if(!WEEK)return '';
   const d=WEEK.weekEnd?new Date(WEEK.weekEnd):null;
   return d?String(d.getUTCDate()).padStart(2,'0')+'/'+String(d.getUTCMonth()+1).padStart(2,'0')+'/'+d.getUTCFullYear():WEEK.weekLabel};
 
+function adjCardsHtml(){
+  const S1=S.settings;
+  return adjCount()?invBlocks().filter(b=>b.kind==='adj').map(b=>{
+    const A=invTotals(b.key),done=invIssued(b.key);
+    return `<div class="card" style="margin-top:18px;border-left:3px solid var(--navy)">
+      <div class="card-h"><h2>Adjustments &mdash; week ending ${esc(b.label)}</h2>
+        <span class="sub">Billed on its own invoice, separate from this week${done?' · issued as '+esc(done.inv):''}</span>
+        <div class="r">
+          <button class="btn" data-adjpdf="${esc(b.key)}">PDF</button>
+          <button class="btn" data-adjmail="${esc(b.key)}">Email${MCP?'':' (connect Gmail)'}</button>
+          <button class="btn ${done?'':'d'}" data-adjissue="${esc(b.key)}" ${done?'disabled':''}>${done?'Issued':'Mark issued'}</button>
+        </div></div>
+      <div class="card-b flush">
+       <div class="tw"><table>
+        <thead><tr><th>Description</th><th>Task code</th><th class="num">Units</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+        <tbody>${A.lines.map(l=>`<tr><td class="nm">${esc(l.desc)}</td><td class="mono" style="font-size:11.5px">${esc(l.code||'')}</td>
+          <td class="num">${fmtQ(l.units)}</td><td class="num">${fmtU(l.rate)}</td><td class="num" style="font-weight:600">${fmtU(l.amt)}</td></tr>`).join('')}</tbody>
+        <tfoot>
+          <tr><td colspan="4">Subtotal</td><td class="num">${fmtU(A.sub)}</td></tr>
+          <tr><td colspan="4">GST @ ${+S1.gst}%</td><td class="num">${fmtU(A.tax)}</td></tr>
+          <tr><td colspan="4"><b>Invoice ${esc(A.num)}</b></td><td class="num"><b>${fmtU(A.total)}</b></td></tr>
+        </tfoot></table></div>
+       ${b.stated!=null&&Math.abs(b.stated-A.sub)>0.02?note('warn','Does not match AFL\u2019s block total',
+         `AFL states <b>${money(b.stated)}</b> for this block but these lines total <b>${money(A.sub)}</b>.`):''}
+      </div></div>`}).join(''):'';
+}
 function renderInv(){
   const el=document.getElementById('invBody');
   if(!WEEK){el.innerHTML=emptyWeek('The AFL invoice');return;}
@@ -2465,8 +2491,10 @@ function renderInv(){
     `<a href="#" onclick="clearNumNote();return false">Dismiss</a>`):''}
   ${!S1.gstno?note('warn','No GST number set','AFL needs your GST/HST number on the invoice. <a href="#" onclick="go(\'set\');return false"><b>Add it in Settings &rarr;</b></a>'):''}
 
-  <div class="card"><div class="card-h"><h2>Invoice ${esc(T.num)}</h2><span class="sub">To ${esc(S1.b_name)}</span>
-    <div class="r"><button class="btn" id="invPdf">Download PDF</button>
+  ${adjCardsHtml()}
+  <div class="card"><div class="card-h"><h2>Invoice ${esc(T.num)} &mdash; week ending ${esc(WEEK.weekLabel)}</h2><span class="sub">To ${esc(S1.b_name)}${adjCount()?' · adjustments invoiced separately above':''}</span>
+    <div class="r">${adjCount()?'<button class="btn" id="invAll">Download all '+(adjCount()+1)+' invoices</button>':''}
+      <button class="btn" id="invPdf">Download PDF</button>
       <button class="btn d" id="invMail">Email to AFL</button>
       <button class="btn p" id="invIssue">Mark issued &amp; save week</button></div></div>
    <div class="card-b" style="background:#F7F9FC"><div class="xlinv">
@@ -2515,30 +2543,21 @@ function renderInv(){
     ${C.rows.length-C.gstRegistered>0?`<div style="padding:13px 18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--grey)">
       ${C.rows.length-C.gstRegistered} technician${C.rows.length-C.gstRegistered>1?'s have':' has'} no GST/HST number on file, so no GST is added to ${C.rows.length-C.gstRegistered>1?'their':'that'} statement${C.rows.length-C.gstRegistered>1?'s':''}.
       <a href="#" onclick="go('tech');return false">Technicians page &rarr;</a></div>`:''}
-   </div></div>
-  ${adjCount()?invBlocks().filter(b=>b.kind==='adj').map(b=>{
-    const A=invTotals(b.key),done=invIssued(b.key);
-    return `<div class="card" style="margin-top:18px;border-left:3px solid var(--navy)">
-      <div class="card-h"><h2>Adjustments &mdash; week ending ${esc(b.label)}</h2>
-        <span class="sub">Billed on its own invoice, separate from this week${done?' · issued as '+esc(done.inv):''}</span>
-        <div class="r">
-          <button class="btn" data-adjpdf="${esc(b.key)}">PDF</button>
-          <button class="btn" data-adjmail="${esc(b.key)}">Email${MCP?'':' (connect Gmail)'}</button>
-          <button class="btn ${done?'':'d'}" data-adjissue="${esc(b.key)}" ${done?'disabled':''}>${done?'Issued':'Mark issued'}</button>
-        </div></div>
-      <div class="card-b flush">
-       <div class="tw"><table>
-        <thead><tr><th>Description</th><th>Task code</th><th class="num">Units</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
-        <tbody>${A.lines.map(l=>`<tr><td class="nm">${esc(l.desc)}</td><td class="mono" style="font-size:11.5px">${esc(l.code||'')}</td>
-          <td class="num">${fmtQ(l.units)}</td><td class="num">${fmtU(l.rate)}</td><td class="num" style="font-weight:600">${fmtU(l.amt)}</td></tr>`).join('')}</tbody>
-        <tfoot>
-          <tr><td colspan="4">Subtotal</td><td class="num">${fmtU(A.sub)}</td></tr>
-          <tr><td colspan="4">GST @ ${+S1.gst}%</td><td class="num">${fmtU(A.tax)}</td></tr>
-          <tr><td colspan="4"><b>Invoice ${esc(A.num)}</b></td><td class="num"><b>${fmtU(A.total)}</b></td></tr>
-        </tfoot></table></div>
-       ${b.stated!=null&&Math.abs(b.stated-A.sub)>0.02?note('warn','Does not match AFL\u2019s block total',
-         `AFL states <b>${money(b.stated)}</b> for this block but these lines total <b>${money(A.sub)}</b>.`):''}
-      </div></div>`}).join(''):''}`;
+   </div></div>`;
+
+  const allBtn=document.getElementById('invAll');
+  if(allBtn)allBtn.onclick=async()=>{
+    allBtn.disabled=true;const was=allBtn.textContent;allBtn.innerHTML='<span class="sp"></span> Building…';
+    try{
+      for(const bk of invBlocks()){
+        const A=invTotals(bk.key);if(!A.lines.length)continue;
+        const nm='Invoice '+A.num+(bk.kind==='adj'?' - adjustments week ending '+bk.label:'')+' - '+S1.b_name;
+        await dl(buildInvPDF(bk.key).output('blob'),safeFile(nm)+'.pdf');
+      }
+      toast('All invoices downloaded','ok');
+    }catch(e){console.error(e);toast('Could not build the downloads','bad');}
+    allBtn.disabled=false;allBtn.textContent=was;
+  };
   document.getElementById('invPdf').onclick=async()=>{
     if(await dl(buildInvPDF('main').output('blob'),safeFile('Invoice '+T.num+' - '+S1.b_name)+'.pdf'))toast('Invoice saved','ok')};
   document.getElementById('invMail').onclick=()=>mailInv('main');
