@@ -1428,6 +1428,22 @@ function dedBalance(sheet,d){
   const {sum}=dedPaidPrior(sheet,d.id,'');
   return +(tot-sum).toFixed(2);
 }
+// One-off deductions keyed in at billing time: any number, any amount, for this
+// week only. They live on the week's record, never on the technician, so they
+// are taken once and never repeat.
+function onceFor(sheet){
+  const row=weekRow();
+  const list=row&&row.once&&row.once[sheet];
+  return Array.isArray(list)?list:[];
+}
+function setOnce(sheet,list){
+  if(!WEEK)return;
+  if(LOCK){toast('This week is settled \u2014 recalculate it first to change a deduction','warn');return;}
+  const row=weekRow();
+  const all=Object.assign({},(row&&row.once)||{});
+  if(list&&list.length)all[sheet]=list;else delete all[sheet];
+  recordWeek(null,{once:all});save();renderStmt();
+}
 function cost(){
   if(!WEEK)return null;
   const gaps=new Map();
@@ -1472,12 +1488,16 @@ function cost(){
     const gst=(gon&&no)?+(r.netPay*gr/100).toFixed(2):0;
     const gps=gpsFor(r);
     const deds=dedsFor(r);
-    const dedTot=+deds.reduce((s,d)=>s+(+d.amt||0),0).toFixed(2);
+    const once=onceFor(r.sheet).filter(d=>+d.amt>0);
+    const dedAll=deds.concat(once.map(d=>({...d,once:true})));
+    const dedTot=+dedAll.reduce((s,d)=>s+(+d.amt||0),0).toFixed(2);
     // A deduction with a total is money being paid back, not income, so it does
     // not touch profit. An open-ended one is a recurring recharge, and earns
     // whatever it recovers above what it costs.
-    const dedProfit=+deds.reduce((s,d)=>s+((+d.total>0)?0:((+d.amt||0)-(+d.cost||0))),0).toFixed(2);
-    return {...r,gstNo:no,gps,deds,dedTot,taxable:r.netPay,gst,
+    const dedProfit=+deds.reduce((s,d)=>s+((+d.total>0)?0:((+d.amt||0)-(+d.cost||0))),0).toFixed(2)
+      // a one-off counts as profit unless it is marked as money being paid back
+      +(+once.reduce((s,d)=>s+(d.noProfit?0:(+d.amt||0)),0).toFixed(2));
+    return {...r,gstNo:no,gps,deds,once,dedAll,dedTot,taxable:r.netPay,gst,
       payable:+(r.netPay+gst-gps-dedTot).toFixed(2),
       profit:+(r.profit+gps+dedProfit).toFixed(2),
       margin:r.aflGross?((r.profit+gps+dedProfit)/r.aflGross*100):0};
@@ -1500,12 +1520,14 @@ function cost(){
   const totDed=+payRows.reduce((s,r)=>s+(r.dedTot||0),0).toFixed(2);
   const dedCount=payRows.filter(r=>r.dedTot>0).length;
   const totDedProfit=+payRows.reduce((s,r)=>
-    s+(r.deds||[]).reduce((a,d)=>a+((+d.total>0)?0:((+d.amt||0)-(+d.cost||0))),0),0).toFixed(2);
+    s+(r.deds||[]).reduce((a,d)=>a+((+d.total>0)?0:((+d.amt||0)-(+d.cost||0))),0)
+     +(r.once||[]).reduce((a,d)=>a+(d.noProfit?0:(+d.amt||0)),0),0).toFixed(2);
+  const totOnce=+payRows.reduce((s,r)=>s+(r.once||[]).reduce((a,d)=>a+(+d.amt||0),0),0).toFixed(2);
   const totPay=+payRows.reduce((s,r)=>s+r.netPay,0).toFixed(2);
   const totGst=+payRows.reduce((s,r)=>s+r.gst,0).toFixed(2);
   const totPayable=+payRows.reduce((s,r)=>s+r.payable,0).toFixed(2);
   return {rows:payRows,totCost,totPay,totGst,totPayable,totGps,gpsCount,totGpsCost,gpsUnrec,gpsRate,
-    totDed,dedCount,totDedProfit,
+    totDed,dedCount,totDedProfit,totOnce,
     gstRegistered:payRows.filter(r=>r.gst>0).length,
     // GPS recovered is cash kept; what the units cost is taken straight back off,
     // so profit shows the real position rather than the recovery alone.
@@ -2072,7 +2094,7 @@ function renderStmt(){
   <div class="kpis">
     <div class="kpi navy"><div class="lbl">Statements to issue</div><div class="val">${rows.length}</div><div class="meta">Week ending ${esc(WEEK.weekLabel)}</div></div>
     <div class="kpi"><div class="lbl">Total payable</div><div class="val">${money(C.totPayable)}</div>
-      <div class="meta">${money(C.totPay)} pay${C.totGst?' + '+money(C.totGst)+' GST':''}${C.totGps?' &minus; '+money(C.totGps)+' GPS':''}${C.totDed?' &minus; '+money(C.totDed)+' deductions':''} · ${C.units.toLocaleString()} units</div></div>
+      <div class="meta">${money(C.totPay)} pay${C.totGst?' + '+money(C.totGst)+' GST':''}${C.totGps?' &minus; '+money(C.totGps)+' GPS':''}${C.totDed?' &minus; '+money(C.totDed)+' deductions'+(C.totOnce?' (incl. '+money(C.totOnce)+' one-off)':''):''} · ${C.units.toLocaleString()} units</div></div>
     <div class="kpi ${ready<rows.length?'warn':'ok'}"><div class="lbl">Ready to send</div><div class="val">${ready}<span style="font-size:16px;color:var(--grey-l)">/${rows.length}</span></div>
       <div class="meta">${noEmail?noEmail+' missing email':''}${noEmail&&blocked?' · ':''}${blocked?blocked+' unpriced':''}${!noEmail&&!blocked?'All clear':''}</div></div>
     <div class="kpi ${sentN===rows.length?'ok':''}"><div class="lbl">Sent</div><div class="val ${sentN===rows.length?'ok':''}">${sentN}<span style="font-size:16px;color:var(--grey-l)">/${rows.length}</span></div>
@@ -2116,6 +2138,7 @@ function renderStmt(){
          ${r.nilUnits?`<span class="tag warn" title="${r.nilUnits} unit(s) at no or zero rate are left off this statement">${r.nilUnits} unit${r.nilUnits>1?'s':''} withheld</span>`:''}</div>
          <div class="e">${r.email?esc(r.email):'<span style="color:var(--warn)">no email on file</span>'}${r.empNo?' · Emp #'+esc(r.empNo):''}</div></div>
        <div class="amt"><div class="a">${money(r.payable)}</div><div class="u">${r.gst>0?money(r.netPay)+' + '+money(r.gst)+' GST':(+(r.units-r.nilUnits).toFixed(2)).toLocaleString()+' units · no GST'}</div></div>
+       <button class="btn sm${(r.once&&r.once.length)?' d':''}" data-once="${esc(r.sheet)}" title="One-off deductions for this week only">Deduct${(r.once&&r.once.length)?' '+money(r.once.reduce((s,d)=>s+(+d.amt||0),0)):''}</button>
        <button class="btn sm" data-sent="${esc(r.sheet)}" data-on="${sentAt?'0':'1'}" title="${sentAt?'Mark as not sent':'Mark as sent by hand'}">${sentAt?'Undo':'Mark sent'}</button>
        <button class="btn sm" onclick="previewStmt('${esc(r.sheet).replace(/'/g,"\\'")}')">Preview</button>
        <button class="btn sm" onclick="dlStmt('${esc(r.sheet).replace(/'/g,"\\'")}')">PDF</button>
@@ -2124,6 +2147,7 @@ function renderStmt(){
   document.getElementById('dlAll').onclick=()=>downloadAll();
   document.getElementById('mailAll').onclick=()=>mailAll();
   el.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>markSent([b.dataset.sent],b.dataset.on==='1'));
+  el.querySelectorAll('[data-once]').forEach(b=>b.onclick=()=>openOnce(b.dataset.once));
 }
 /* ---------- settled-week lock & sent register ---------- */
 const weekRow=()=>WEEK?S.history.find(x=>x.week===WEEK.weekLabel):null;
@@ -2134,6 +2158,44 @@ function markSent(sheets,on){
   sheets.forEach(s=>{if(on)m[s]=new Date().toISOString();else delete m[s]});
   recordWeek(null,{sent:m});save();renderStmt();
 }
+window.openOnce=sheet=>{
+  if(!WEEK)return;
+  const C=cost(),r=C.rows.find(x=>x.sheet===sheet);
+  if(!r)return;
+  let list=onceFor(sheet).map(d=>({...d}));
+  const draw=()=>{
+    const rows=list.map((d,i)=>`<tr>
+      <td><input class="inp sm" value="${esc(d.name||'')}" placeholder="e.g. Damaged equipment" data-o="${i}" data-f="name" style="min-width:190px"></td>
+      <td><input class="inp sm num" type="number" step="0.01" value="${d.amt!=null?d.amt:''}" placeholder="0.00" data-o="${i}" data-f="amt" style="width:100px"></td>
+      <td style="text-align:center"><label class="sw" title="Off if this is money being paid back rather than income"><input type="checkbox" ${d.noProfit?'':'checked'} data-o="${i}" data-f="profit"><span class="sl"></span></label></td>
+      <td class="num"><button class="btn sm danger" data-orm="${i}">Remove</button></td></tr>`).join('');
+    const tot=list.reduce((s,d)=>s+(+d.amt||0),0);
+    openM('Deductions this week \u2014 '+esc(r.name),`
+      <p style="font-size:12.5px;color:var(--grey);line-height:1.6;margin-bottom:12px">
+      One-off deductions for <b>week ending ${esc(WEEK.weekLabel)}</b> only \u2014 they are not repeated on any other week.
+      Taken after GST and itemised on the statement under the name you give here, so put something the technician will recognise.
+      Turn <b>Profit</b> off if you are recovering money you already paid out rather than earning it.</p>
+      <div class="tw" style="border:1px solid var(--line);border-radius:8px"><table>
+      <thead><tr><th>What the technician sees</th><th class="num">Amount</th><th style="text-align:center">Profit</th><th></th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="4" style="padding:18px;text-align:center;color:var(--grey)">Nothing deducted this week.</td></tr>'}</tbody>
+      ${list.length?`<tfoot><tr><td>Total deducted</td><td class="num">${money(tot)}</td><td colspan="2"></td></tr>
+        <tr><td>Pay after these deductions</td><td class="num">${money(+(r.payable+ (r.once||[]).reduce((s,d)=>s+(+d.amt||0),0) - tot).toFixed(2))}</td><td colspan="2"></td></tr></tfoot>`:''}
+      </table></div>`,
+      [{t:'Add a deduction',k:'',f:()=>{list.push({id:uid(),name:'',amt:null});draw()}},
+       {t:'Save',k:'p',f:()=>{closeM();setOnce(sheet,list.filter(d=>(d.name||'').trim()&&+d.amt>0))}}],true);
+    const box=document.getElementById('modB');
+    box.querySelectorAll('[data-o]').forEach(el=>{
+      const i=+el.dataset.o,f=el.dataset.f;
+      el.onchange=()=>{
+        if(f==='profit')list[i].noProfit=!el.checked;
+        else if(f==='name')list[i].name=el.value;
+        else list[i][f]=el.value===''?null:+el.value;
+        if(f!=='name')draw();
+      };});
+    box.querySelectorAll('[data-orm]').forEach(el=>el.onclick=()=>{list.splice(+el.dataset.orm,1);draw()});
+  };
+  draw();
+};
 function lockBanner(){
   if(!LOCK)return '';
   const d=LOCK.at?new Date(LOCK.at).toLocaleDateString('en-CA'):'';
@@ -2248,9 +2310,9 @@ function buildStmtPDF(key){
   if(anyDed||d.r.gst>0)put('Subtotal for services',money(d.r.netPay));
   if(d.r.gst>0)put('GST/HST @ '+(+S.settings.gstPay)+'%',money(d.r.gst));
   if(d.r.gps>0)put('Less: GPS unit'+(gpsM?' \u2014 '+gpsM:''),money(-d.r.gps));
-  (d.r.deds||[]).forEach(dd=>{
+  (d.r.dedAll||[]).forEach(dd=>{
     const bal=dd.total>0?+(dd.total-dd.paidBefore-dd.amt).toFixed(2):null;
-    put('Less: '+dd.name+(gpsM?' \u2014 '+gpsM:'')+(bal!==null?'  ('+money(bal)+' remaining)':''),money(-dd.amt));
+    put('Less: '+dd.name+(dd.once?'':(gpsM?' \u2014 '+gpsM:''))+(bal!==null?'  ('+money(bal)+' remaining)':''),money(-dd.amt));
   });
   y+=1.5;put(d.r.gst>0?'TOTAL PAYABLE':'TOTAL PAY',money(d.r.payable),true);
 
@@ -2278,8 +2340,8 @@ window.previewStmt=key=>{
       <td class="num">${money(d.r.netPay)}</td></tr>
       ${d.r.gst>0?`<tr><td colspan="3">GST/HST @ ${+S.settings.gstPay}%</td><td class="num">${money(d.r.gst)}</td></tr>`:''}
       ${d.r.gps>0?`<tr><td colspan="3">Less: GPS unit${weekMonth()?' — '+esc(weekMonth()):''}</td><td class="num">-${money(d.r.gps)}</td></tr>`:''}
-      ${(d.r.deds||[]).map(dd=>{const bal=dd.total>0?+(dd.total-dd.paidBefore-dd.amt).toFixed(2):null;
-        return `<tr><td colspan="3">Less: ${esc(dd.name)}${weekMonth()?' — '+esc(weekMonth()):''}${bal!==null?` <span style="color:var(--grey)">(${money(bal)} remaining)</span>`:''}</td><td class="num">-${money(dd.amt)}</td></tr>`}).join('')}
+      ${(d.r.dedAll||[]).map(dd=>{const bal=dd.total>0?+(dd.total-dd.paidBefore-dd.amt).toFixed(2):null;
+        return `<tr><td colspan="3">Less: ${esc(dd.name)}${dd.once?'':(weekMonth()?' — '+esc(weekMonth()):'')}${bal!==null?` <span style="color:var(--grey)">(${money(bal)} remaining)</span>`:''}</td><td class="num">-${money(dd.amt)}</td></tr>`}).join('')}
       ${(d.r.gst>0||d.r.gps>0||d.r.dedTot>0)?`<tr><td colspan="3">${d.r.gst>0?'Total payable':'Total pay'}</td><td class="num">${money(d.r.payable)}</td></tr>`:''}</tfoot></table></div>
    ${d.excluded.length?`
    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--warn);font-weight:700;margin:18px 0 8px">
@@ -2339,7 +2401,7 @@ function stmtEmail(r,d){
 ${(r.gst>0||r.gps>0||r.dedTot>0)?`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Subtotal for services</td><td style="padding:5px 0;font-weight:600">${money(r.netPay)}</td></tr>`:''}
 ${r.gst>0?`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">GST/HST @ ${+S.settings.gstPay}%</td><td style="padding:5px 0;font-weight:600">${money(r.gst)}</td></tr>`:''}
 ${r.gps>0?`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Less: GPS unit${weekMonth()?' — '+esc(weekMonth()):''}</td><td style="padding:5px 0;font-weight:600">-${money(r.gps)}</td></tr>`:''}
-${(r.deds||[]).map(dd=>`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Less: ${esc(dd.name)}${weekMonth()?' — '+esc(weekMonth()):''}</td><td style="padding:5px 0;font-weight:600">-${money(dd.amt)}</td></tr>`).join('')}
+${(r.dedAll||[]).map(dd=>`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Less: ${esc(dd.name)}${dd.once?'':(weekMonth()?' — '+esc(weekMonth()):'')}</td><td style="padding:5px 0;font-weight:600">-${money(dd.amt)}</td></tr>`).join('')}
 <tr><td style="padding:5px 18px 5px 0;color:#6b7280">${r.gst>0?'Total payable':'Total pay'}</td><td style="padding:5px 0;font-weight:700;font-size:17px;color:#0F8A5F">${money(r.payable)}</td></tr>
 </table>
 <p style="font-size:13px;color:#6b7280">Please review the attached statement and raise any query with the office within 7 days.</p>
@@ -2825,6 +2887,7 @@ function recordWeek(status,extra){
     gps:C.rows.reduce((o,r)=>{if(r.gps>0)o[r.sheet]=r.gps;return o},{}),
     gpsRec:C.totGps,gpsCost:C.totGpsCost,gpsUnrec:C.gpsUnrec,
     ded:C.rows.reduce((o,r)=>{if(r.deds&&r.deds.length)o[r.sheet]=r.deds.map(d=>({id:d.id,name:d.name,amt:d.amt,cost:d.cost,total:d.total}));return o},{}),
+    once:prev.once||{},
     dedTot:C.totDed,
     // A locked week keeps the rates it was settled at; an open one re-snapshots.
     snap:(LOCK?(prev.snap||LOCK):snapWeek()),
