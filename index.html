@@ -2447,12 +2447,8 @@ function adjCardsHtml(){
     const A=invTotals(b.key),done=invIssued(b.key);
     return `<div class="card" style="margin-top:18px;border-left:3px solid var(--navy)">
       <div class="card-h"><h2>Adjustments &mdash; week ending ${esc(b.label)}</h2>
-        <span class="sub">Billed on its own invoice, separate from this week${done?' · issued as '+esc(done.inv):''}</span>
-        <div class="r">
-          <button class="btn" data-adjpdf="${esc(b.key)}">PDF</button>
-          <button class="btn" data-adjmail="${esc(b.key)}">Email${MCP?'':' (connect Gmail)'}</button>
-          <button class="btn ${done?'':'d'}" data-adjissue="${esc(b.key)}" ${done?'disabled':''}>${done?'Issued':'Mark issued'}</button>
-        </div></div>
+        <span class="sub">Invoice ${esc(A.num)} · billed separately from this week${done?' · issued':''}</span>
+        </div>
       <div class="card-b flush">
        <div class="tw"><table>
         <thead><tr><th>Description</th><th>Task code</th><th class="num">Units</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
@@ -2491,12 +2487,27 @@ function renderInv(){
     `<a href="#" onclick="clearNumNote();return false">Dismiss</a>`):''}
   ${!S1.gstno?note('warn','No GST number set','AFL needs your GST/HST number on the invoice. <a href="#" onclick="go(\'set\');return false"><b>Add it in Settings &rarr;</b></a>'):''}
 
+  ${(()=>{const bs=invBlocks().filter(b=>invTotals(b.key).lines.length);
+    const multi=bs.length>1;
+    const btns=bs.map((b,i)=>`<button class="btn" data-dl="${esc(b.key)}">Download Invoice${multi?' '+(i+1):''}</button>`).join('');
+    const rows=bs.map((b,i)=>{const A=invTotals(b.key),done=invIssued(b.key);
+      return `<tr><td class="nm">${multi?'Invoice '+(i+1):'Invoice'}</td>
+        <td class="mono">${esc(A.num)}</td>
+        <td>${b.kind==='adj'?'Adjustments &mdash; week ending '+esc(b.label):'Week ending '+esc(WEEK.weekLabel)}</td>
+        <td class="num">${money(A.sub)}</td><td class="num">${money(A.tax)}</td>
+        <td class="num" style="font-weight:600">${money(A.total)}</td>
+        <td>${done?'<span class="tag ok">issued</span>':'<span class="tag grey">not issued</span>'}</td></tr>`}).join('');
+    return `<div class="card"><div class="card-h"><h2>${multi?bs.length+' invoices for this week':'Invoice for this week'}</h2>
+      <span class="sub">To ${esc(S1.b_name)}</span>
+      <div class="r">${btns}
+        <button class="btn d" id="invMail">Email to AFL</button>
+        <button class="btn p" id="invIssue">Mark issued &amp; save week</button></div></div>
+     <div class="card-b flush"><div class="tw"><table>
+      <thead><tr><th></th><th>Number</th><th>Covers</th><th class="num">Subtotal</th><th class="num">GST</th><th class="num">Total</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div></div></div>`})()}
   ${adjCardsHtml()}
   <div class="card"><div class="card-h"><h2>Invoice ${esc(T.num)} &mdash; week ending ${esc(WEEK.weekLabel)}</h2><span class="sub">To ${esc(S1.b_name)}${adjCount()?' · adjustments invoiced separately above':''}</span>
-    <div class="r">${adjCount()?'<button class="btn" id="invAll">Download all '+(adjCount()+1)+' invoices</button>':''}
-      <button class="btn" id="invPdf">Download PDF</button>
-      <button class="btn d" id="invMail">Email to AFL</button>
-      <button class="btn p" id="invIssue">Mark issued &amp; save week</button></div></div>
+    <div class="r"></div></div>
    <div class="card-b" style="background:#F7F9FC"><div class="xlinv">
     <table class="xl">
       <tr><td class="co" colspan="2">${esc(S1.name)}</td><td class="sp"></td><td class="hd">INVOICE #</td><td class="hd">INVOICE DATE</td></tr>
@@ -2545,28 +2556,17 @@ function renderInv(){
       <a href="#" onclick="go('tech');return false">Technicians page &rarr;</a></div>`:''}
    </div></div>`;
 
-  const allBtn=document.getElementById('invAll');
-  if(allBtn)allBtn.onclick=async()=>{
-    allBtn.disabled=true;const was=allBtn.textContent;allBtn.innerHTML='<span class="sp"></span> Building…';
-    try{
-      for(const bk of invBlocks()){
-        const A=invTotals(bk.key);if(!A.lines.length)continue;
-        const nm='Invoice '+A.num+(bk.kind==='adj'?' - adjustments week ending '+bk.label:'')+' - '+S1.b_name;
-        await dl(buildInvPDF(bk.key).output('blob'),safeFile(nm)+'.pdf');
-      }
-      toast('All invoices downloaded','ok');
-    }catch(e){console.error(e);toast('Could not build the downloads','bad');}
-    allBtn.disabled=false;allBtn.textContent=was;
-  };
-  document.getElementById('invPdf').onclick=async()=>{
-    if(await dl(buildInvPDF('main').output('blob'),safeFile('Invoice '+T.num+' - '+S1.b_name)+'.pdf'))toast('Invoice saved','ok')};
-  document.getElementById('invMail').onclick=()=>mailInv('main');
-  document.getElementById('invIssue').onclick=()=>issueInv('main');
-  el.querySelectorAll('[data-adjpdf]').forEach(btn=>btn.onclick=async()=>{
-    const k=btn.dataset.adjpdf,A=invTotals(k);
-    if(await dl(buildInvPDF(k).output('blob'),safeFile('Invoice '+A.num+' - adjustments - '+S1.b_name)+'.pdf'))toast('Invoice saved','ok')});
-  el.querySelectorAll('[data-adjmail]').forEach(btn=>btn.onclick=()=>mailInv(btn.dataset.adjmail));
-  el.querySelectorAll('[data-adjissue]').forEach(btn=>btn.onclick=()=>issueInv(btn.dataset.adjissue));
+  el.querySelectorAll('[data-dl]').forEach(btn=>btn.onclick=async()=>{
+    const k=btn.dataset.dl,A=invTotals(k);
+    const b=invBlocks().find(x=>x.key===k)||{kind:'main'};
+    const nm='Invoice '+A.num+(b.kind==='adj'?' - adjustments week ending '+b.label:'')+' - '+S1.b_name;
+    btn.disabled=true;const was=btn.textContent;btn.innerHTML='<span class="sp"></span> Saving…';
+    try{if(await dl(buildInvPDF(k).output('blob'),safeFile(nm)+'.pdf'))toast('Invoice '+A.num+' saved','ok');}
+    catch(e){console.error(e);toast('Could not build that invoice','bad');}
+    btn.disabled=false;btn.textContent=was;
+  });
+  document.getElementById('invMail').onclick=()=>mailInv();
+  document.getElementById('invIssue').onclick=()=>issueAll();
 }
 const fmtU=v=>(v<0?'($':'$')+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+(v<0?')':'');
 const fmtQ=v=>(v<0?'(':'')+Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})+(v<0?')':'');
@@ -2684,31 +2684,69 @@ function buildInvPDF(key){
   return doc;
 }
 
-async function mailInv(key){
+// One draft for the week, carrying every invoice it produced.
+async function mailInv(){
   const S1=S.settings;
   if(!MCP){toast('Connect Gmail to your Claude account to email invoices','warn');return;}
   if(!S1.b_email){toast('Add the AFL accounts-payable email in Settings first','warn');go('set');return;}
-  const T=invTotals(key);
-  const blk=invBlocks().find(b=>b.key===(key||'main'))||{kind:'main'};
-  const sub=T.sub,gst=T.tax,tot=T.total,num=T.num;
-  confirmM('Email invoice '+num,`Create a Gmail draft to <b>${esc(S1.b_email)}</b> with the invoice PDF attached? Nothing is sent until you review it in Gmail.`,
+  const blocks=invBlocks().filter(b=>invTotals(b.key).lines.length);
+  if(!blocks.length){toast('There is nothing to invoice','warn');return;}
+  const parts=blocks.map(b=>({b,T:invTotals(b.key)}));
+  const grand=+parts.reduce((s,x)=>s+x.T.total,0).toFixed(2);
+  const listHtml=parts.map(x=>`<tr><td style="padding:5px 18px 5px 0;color:#6b7280">${esc(x.T.num)} &mdash; ${
+      x.b.kind==='adj'?'adjustments, week ending '+esc(x.b.label):'week ending '+esc(WEEK.weekLabel)
+    }</td><td style="padding:5px 0;font-weight:600">${money(x.T.total)}</td></tr>`).join('');
+  confirmM(parts.length>1?'Email '+parts.length+' invoices':'Email invoice '+parts[0].T.num,
+    `Create a Gmail draft to <b>${esc(S1.b_email)}</b> with ${parts.length>1?'all '+parts.length+' invoice PDFs':'the invoice PDF'} attached?<br><br>`
+    +parts.map(x=>`<b>${esc(x.T.num)}</b> &mdash; ${x.b.kind==='adj'?'adjustments, week ending '+esc(x.b.label):'week ending '+esc(WEEK.weekLabel)} &mdash; ${money(x.T.total)}`).join('<br>')
+    +`<br><br>Nothing is sent until you review it in Gmail.`,
    async()=>{closeM();
     try{
-      const doc=buildInvPDF(key);const b64=doc.output('datauristring').split(',')[1];
+      const atts=parts.map(x=>({content:buildInvPDF(x.b.key).output('datauristring').split(',')[1],
+        filename:`Invoice ${x.T.num}${x.b.kind==='adj'?' - adjustments':''}.pdf`,mimeType:'application/pdf'}));
       await MCP.callTool('Gmail','create_draft',{to:[S1.b_email],
-        subject:`Invoice ${num} — ${S1.name} — week ending ${WEEK.weekLabel}`,
+        subject:`${parts.length>1?'Invoices':'Invoice'} ${parts.map(x=>x.T.num).join(', ')} — ${S1.name} — week ending ${WEEK.weekLabel}`,
         htmlBody:`<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1b2234;line-height:1.6">
-<p>Hello,</p><p>Please find attached invoice <b>${num}</b> for contractor services for the week ending <b>${esc(WEEK.weekLabel)}</b>.</p>
-<table style="border-collapse:collapse;margin:14px 0;font-size:14px">
-<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Subtotal</td><td style="padding:5px 0;font-weight:600">${money(sub)}</td></tr>
-<tr><td style="padding:5px 18px 5px 0;color:#6b7280">GST @ ${S1.gst}%</td><td style="padding:5px 0;font-weight:600">${money(gst)}</td></tr>
-<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Total due</td><td style="padding:5px 0;font-weight:700;font-size:17px;color:#16215B">${money(tot)} ${esc(S1.cur)}</td></tr>
+<p>Hello,</p><p>Please find attached ${parts.length>1?'our invoices':'our invoice'} for contractor services for the week ending <b>${esc(WEEK.weekLabel)}</b>${
+  parts.length>1?', including adjustments to earlier weeks billed separately':''}.</p>
+<table style="border-collapse:collapse;margin:14px 0;font-size:14px">${listHtml}
+<tr><td style="padding:5px 18px 5px 0;color:#6b7280">Total due</td><td style="padding:5px 0;font-weight:700;font-size:17px;color:#16215B">${money(grand)} ${esc(S1.cur)}</td></tr>
 </table><p style="font-size:13px;color:#6b7280">Payment terms: ${esc(S1.netTerms||('net '+S1.terms+' days'))}. Vendor ID ${esc(S1.vendorId||'')}.</p>
 <p style="margin-top:20px">Regards,<br><b>${esc(S1.name)}</b></p></div>`,
-        attachments:[{content:b64,filename:`Invoice ${num}.pdf`,mimeType:'application/pdf'}]});
-      toast('Invoice draft created in Gmail','ok');
+        attachments:atts});
+      toast(parts.length>1?parts.length+' invoices attached to a Gmail draft':'Invoice draft created in Gmail','ok');
     }catch(e){console.error(e);toast('Could not create the draft — check the Gmail connection','bad');}
    });
+}
+// Mark every invoice for the week issued, in order, each taking its own number.
+function issueAll(){
+  if(!WEEK){toast('Load the week\u2019s AFL file before marking an invoice issued','warn');return;}
+  const pend=invBlocks().filter(b=>!invIssued(b.key)&&invTotals(b.key).lines.length);
+  if(!pend.length){toast('Every invoice for this week has already been issued','warn');return;}
+  const S1=S.settings;
+  const preview=pend.map((b,i)=>`<b>${esc((S1.pref||'')+(+S1.next+i))}</b> &mdash; ${
+    b.kind==='adj'?'adjustments, week ending '+esc(b.label):'week ending '+esc(WEEK.weekLabel)
+  } &mdash; ${money(invTotals(b.key).total)}`).join('<br>');
+  confirmM(pend.length>1?'Mark '+pend.length+' invoices issued':'Mark invoice issued',
+    preview+`<br><br>Save ${pend.length>1?'them':'it'} to history and advance the next invoice number to <b>${esc((S1.pref||'')+(+S1.next+pend.length))}</b>?`,
+   ()=>{closeM();
+    let done=0,last='';
+    pend.forEach(b=>{
+      const T=invTotals(b.key);
+      const num=(S.settings.pref||'')+S.settings.next;
+      const prev=weekRow();
+      const invs=(prev&&Array.isArray(prev.invs)?prev.invs.slice():[]).filter(x=>x.key!==b.key)
+        .concat([{key:b.key,kind:b.kind,label:b.kind==='adj'?b.label:WEEK.weekLabel,
+                  inv:num,gst:T.tax,total:T.total,issued:new Date().toISOString()}]);
+      const extra={invs};
+      if(b.key==='main'){extra.inv=num;extra.gst=T.tax;extra.total=T.total;extra.issued=new Date().toISOString();}
+      const row=recordWeek(invs.some(x=>x.key==='main')?'invoiced':null,extra);
+      if(!row)return;
+      S.settings.next=+S.settings.next+1;done++;last=num;
+    });
+    if(!done){toast('Nothing was recorded \u2014 the invoice numbers are unchanged','bad');return;}
+    save();renderAll();
+    toast(done>1?done+' invoices recorded':'Invoice '+last+' recorded','ok');go('hist');});
 }
 function issueInv(key){
   // Without a week there is nothing to record, and advancing the number anyway
